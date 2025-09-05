@@ -9,6 +9,35 @@ lerna-debug.log*
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
+# Security - SSL certificates and keys
+security/key.pem
+security/cert.pem
+security/*.csr
+*.key
+*.pem
+*.crt
+
+# Recordings - Video files
+recordings/
+*.mp4
+*.avi
+*.mov
+
+# Build output
+dist/
+build/
+
+# Backup files
+*.backup.*
+config.backup.ts
+
+# ESP32 Arduino IDE files
+*.ino.bin
+*.ino.elf
+*.ino.map
+*.ino.partitions.bin
+*.ino.bootloader.bin
+
 # Runtime data
 pids
 *.pid

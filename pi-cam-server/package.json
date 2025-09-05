@@ -1,0 +1,43 @@
+{
+  "name": "pi-cam-server",
+  "version": "1.0.0",
+  "description": "Secure wireless camera system host server for Raspberry Pi 5",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "nodemon src/server.ts",
+    "clean": "rm -rf dist",
+    "prestart": "npm run build"
+  },
+  "keywords": [
+    "raspberry-pi",
+    "camera",
+    "surveillance",
+    "websocket",
+    "esp32"
+  ],
+  "author": "MagicInUse",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.14.2",
+    "bonjour": "^3.5.0",
+    "fluent-ffmpeg": "^2.1.2",
+    "node-cron": "^3.0.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.2.2",
+    "ts-node": "^10.9.1",
+    "nodemon": "^3.0.1",
+    "@types/node": "^20.8.0",
+    "@types/express": "^4.17.17",
+    "@types/ws": "^8.5.5",
+    "@types/bonjour": "^3.5.10",
+    "@types/fluent-ffmpeg": "^2.1.21",
+    "@types/node-cron": "^3.0.8"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
