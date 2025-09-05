@@ -6,7 +6,7 @@
 import express from 'express';
 import https from 'https';
 import { WebSocketServer, WebSocket } from 'ws';
-import bonjour from 'bonjour';
+import { Responder } from '@homebridge/ciao';
 import { promises as fs } from 'fs';
 import { IncomingMessage } from 'http';
 import url from 'url';
@@ -25,7 +25,8 @@ class PiCameraServer {
   private app: express.Application;
   private server: https.Server | null = null;
   private wsServer: WebSocketServer | null = null;
-  private bonjourInstance: any = null;
+  private mdnsResponder: Responder | null = null;
+  private mdnsService: any = null;
   private deviceManager: DeviceManager;
   private videoProcessor: VideoProcessor;
   private cleanupService: CleanupService;
@@ -85,7 +86,7 @@ class PiCameraServer {
     // Device registration endpoint
     this.app.post('/register', async (req, res) => {
       try {
-        const { deviceId } = req.body;
+        const { deviceId, operationMode, motionSensorDetected, firmwareVersion, capabilities } = req.body;
 
         if (!deviceId) {
           return res.status(400).json({
@@ -106,6 +107,14 @@ class PiCameraServer {
         // Register device
         const result = this.deviceManager.registerDevice(deviceId);
 
+        // Update operation mode if provided
+        if (operationMode && ['motion-triggered', 'always-on', 'continuous'].includes(operationMode)) {
+          this.deviceManager.updateOperationMode(deviceId, operationMode as any, motionSensorDetected || false);
+        }
+
+        // Log registration details
+        console.log(`Device registered: ${deviceId}, Mode: ${operationMode || 'default'}, Motion Sensor: ${motionSensorDetected || false}`);
+
         res.json({
           success: true,
           apiKey: result.apiKey,
@@ -113,10 +122,9 @@ class PiCameraServer {
           serverInfo: {
             wsPort: config.server.httpsPort,
             wsPath: '/ws'
-          }
+          },
+          operationModes: config.operationModes
         });
-
-        console.log(`Device registered successfully: ${deviceId}`);
       } catch (error) {
         console.error('Registration error:', error);
         res.status(500).json({
@@ -459,12 +467,11 @@ class PiCameraServer {
    */
   private setupMDNS(): void {
     try {
-      this.bonjourInstance = bonjour();
-      
-      this.bonjourInstance.publish({
+      this.mdnsResponder = Responder.getResponder();
+
+      const service = this.mdnsResponder.createService({
         name: config.server.serviceName,
         type: config.server.serviceType,
-        protocol: config.server.protocol,
         port: config.server.httpsPort,
         txt: {
           version: '1.0.0',
@@ -473,7 +480,14 @@ class PiCameraServer {
         }
       });
 
-      console.log(`mDNS service published: ${config.server.serviceName} on port ${config.server.httpsPort}`);
+      this.mdnsService = service;
+      
+      service.advertise().then(() => {
+        console.log(`mDNS service published: ${config.server.serviceName} on port ${config.server.httpsPort}`);
+      }).catch((error: any) => {
+        console.error('Failed to advertise mDNS service:', error);
+      });
+
     } catch (error) {
       console.error('Error setting up mDNS:', error);
     }
@@ -537,9 +551,11 @@ class PiCameraServer {
       }
 
       // Stop mDNS
-      if (this.bonjourInstance) {
-        this.bonjourInstance.unpublishAll();
-        this.bonjourInstance.destroy();
+      if (this.mdnsService) {
+        await this.mdnsService.destroy();
+      }
+      if (this.mdnsResponder) {
+        await this.mdnsResponder.shutdown();
       }
 
       console.log('Pi Camera Server stopped');
@@ -584,7 +600,7 @@ async function main(): Promise<void> {
 }
 
 // Start the application
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (require.main === module) {
   main().catch((error) => {
     console.error('Failed to start server:', error);
     process.exit(1);

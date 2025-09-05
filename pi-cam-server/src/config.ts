@@ -82,7 +82,36 @@ export const config = {
     quality: 12,
     brightness: 0,
     contrast: 0,
-    saturation: 0
+    saturation: 0,
+    operationMode: 'motion-triggered', // 'motion-triggered' or 'always-on'
+    alwaysOnDuration: 300000, // 5 minutes of continuous streaming for always-on mode
+    alwaysOnInterval: 600000  // 10 minutes between streaming sessions for always-on mode
+  },
+
+  // Operation mode configurations
+  operationModes: {
+    'motion-triggered': {
+      description: 'Wake on motion detection, stream, then sleep',
+      powerEfficient: true,
+      requiresMotionSensor: true,
+      streamingDuration: 30000, // 30 seconds
+      sleepBetweenTriggers: true
+    },
+    'always-on': {
+      description: 'Continuous operation with periodic streaming',
+      powerEfficient: false,
+      requiresMotionSensor: false,
+      streamingDuration: 300000, // 5 minutes
+      sleepBetweenTriggers: true,
+      sleepDuration: 300000 // 5 minutes sleep between sessions
+    },
+    'continuous': {
+      description: 'Non-stop streaming (requires constant power)',
+      powerEfficient: false,
+      requiresMotionSensor: false,
+      streamingDuration: 0, // Unlimited
+      sleepBetweenTriggers: false
+    }
   }
 } as const;
 

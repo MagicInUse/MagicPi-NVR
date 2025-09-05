@@ -48,7 +48,9 @@ MagicPi-NVR/
 ✅ **Automated Installation** - Complete setup script  
 
 ### ESP32-CAM Client (Arduino C++)
-✅ **Motion Detection** - PIR sensor integration  
+✅ **Multiple Operation Modes** - Motion-triggered, Always-on, Continuous  
+✅ **Auto-Detection** - Automatic hardware detection and mode configuration  
+✅ **Motion Detection** - PIR sensor integration (optional)  
 ✅ **Deep Sleep Power Management** - Ultra-low power consumption  
 ✅ **Automatic Server Discovery** - mDNS client implementation  
 ✅ **Secure Registration** - TLS certificate validation  
@@ -93,7 +95,8 @@ The installation script will:
    - Paste into `SERVER_CERTIFICATE` variable
 
 4. **Hardware Connections**:
-   - Connect PIR sensor to GPIO 13
+   - **Optional**: Connect PIR sensor to GPIO 13 for motion-triggered mode
+   - If no motion sensor: Device operates in always-on mode automatically
    - Ensure stable 3.3V power supply
 
 ## 🔒 Security Architecture
@@ -132,12 +135,26 @@ recordings/
   - Active: 7-10 hours (2000mAh battery)
   - Sleep: 4-20 months (2000mAh battery)
 
-### Operation Cycle
+### Operation Modes
+
+#### Motion-Triggered Mode (PIR sensor connected)
 1. **Motion Detected** → Wake from deep sleep
 2. **WiFi Connect** → Reconnect to network
 3. **Server Connect** → WebSocket authentication
 4. **Stream Video** → 30 seconds (configurable)
 5. **Enter Sleep** → Wait for next motion
+
+#### Always-On Mode (No PIR sensor)
+1. **Timer Wake** → Wake every 5 minutes
+2. **WiFi Connect** → Reconnect to network
+3. **Server Connect** → WebSocket authentication
+4. **Stream Video** → 30 seconds (configurable)
+5. **Enter Sleep** → Wait for next timer
+
+#### Continuous Mode (Server configured)
+1. **Always Active** → No sleep mode
+2. **Continuous Streaming** → Non-stop video
+3. **Best For** → Critical monitoring areas
 
 ## 🌐 Network Architecture
 

@@ -28,6 +28,9 @@ export interface DeviceConfig {
   brightness: number;
   contrast: number;
   saturation: number;
+  operationMode: 'motion-triggered' | 'always-on' | 'continuous';
+  alwaysOnDuration?: number;
+  alwaysOnInterval?: number;
 }
 
 /**
@@ -43,6 +46,8 @@ export interface DeviceInfo {
   registeredAt: Date;
   totalConnections: number;
   isRecording: boolean;
+  operationMode: 'motion-triggered' | 'always-on' | 'continuous';
+  motionSensorDetected: boolean;
 }
 
 /**
@@ -100,7 +105,9 @@ export class DeviceManager {
         lastSeen: new Date(),
         registeredAt: new Date(),
         totalConnections: 0,
-        isRecording: false
+        isRecording: false,
+        operationMode: deviceConfig.operationMode,
+        motionSensorDetected: false // Will be updated when device connects
       };
 
       // Store device information
@@ -278,6 +285,42 @@ export class DeviceManager {
       }
     } catch (error) {
       console.error(`Error updating device config for ${deviceId}:`, error);
+    }
+  }
+
+  /**
+   * Update device operation mode
+   * @param deviceId - Device ID to update
+   * @param operationMode - New operation mode
+   * @param motionSensorDetected - Whether motion sensor is detected
+   */
+  public updateOperationMode(
+    deviceId: string, 
+    operationMode: 'motion-triggered' | 'always-on' | 'continuous',
+    motionSensorDetected: boolean = false
+  ): void {
+    try {
+      const device = this.devices.get(deviceId);
+      if (device) {
+        device.operationMode = operationMode;
+        device.motionSensorDetected = motionSensorDetected;
+        device.config.operationMode = operationMode;
+        
+        console.log(`Device ${deviceId} operation mode updated to: ${operationMode} (motion sensor: ${motionSensorDetected})`);
+        
+        // Send operation mode update to device if connected
+        if (device.socket && device.socket.readyState === WebSocket.OPEN) {
+          this.sendCommand(deviceId, {
+            action: 'update_operation_mode',
+            operationMode: operationMode,
+            config: device.config
+          });
+        }
+      } else {
+        console.warn(`Attempted to update operation mode for unknown device: ${deviceId}`);
+      }
+    } catch (error) {
+      console.error(`Error updating operation mode for device ${deviceId}:`, error);
     }
   }
 

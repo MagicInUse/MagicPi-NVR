@@ -50,8 +50,18 @@ const char* SERVICE_TYPE = "_mycam-server";
 const char* PROTOCOL = "_tcp";
 const int MDNS_TIMEOUT = 10000; // 10 seconds
 
+// ===== OPERATION MODE CONFIGURATION =====
+// Set to true to force always-on mode (ignores motion sensor)
+// Set to false to auto-detect based on motion sensor presence
+#define FORCE_ALWAYS_ON_MODE false
+
+// Always-on mode settings
+const unsigned long ALWAYS_ON_STREAMING_DURATION = 300000;  // 5 minutes
+const unsigned long ALWAYS_ON_SLEEP_DURATION = 300000;      // 5 minutes between sessions
+const unsigned long CONTINUOUS_MODE_HEARTBEAT = 30000;      // 30 seconds for continuous mode
+
 // ===== STREAMING CONFIGURATION =====
-const unsigned long STREAMING_DURATION = 30000; // 30 seconds of streaming
+const unsigned long STREAMING_DURATION = 30000; // 30 seconds of streaming (motion mode)
 const unsigned long FRAME_INTERVAL = 100;       // 100ms between frames (10 fps)
 const unsigned long HEARTBEAT_INTERVAL = 5000;  // 5 seconds between heartbeats
 
@@ -62,6 +72,8 @@ RTC_DATA_ATTR char apiKey[65] = "";
 RTC_DATA_ATTR bool isRegistered = false;
 RTC_DATA_ATTR int bootCount = 0;
 RTC_DATA_ATTR unsigned long totalUptime = 0;
+RTC_DATA_ATTR char operationMode[20] = "auto-detect";  // "motion-triggered", "always-on", "continuous", "auto-detect"
+RTC_DATA_ATTR bool motionSensorDetected = false;
 
 // ===== GLOBAL VARIABLES =====
 WiFiClientSecure secureClient;
@@ -71,6 +83,8 @@ bool isStreaming = false;
 unsigned long streamingStartTime = 0;
 unsigned long lastFrameTime = 0;
 unsigned long lastHeartbeatTime = 0;
+unsigned long currentStreamingDuration = STREAMING_DURATION;
+bool continuousMode = false;
 
 // ===== SERVER CERTIFICATE =====
 // Replace this with the contents of your server's cert.pem file
@@ -79,6 +93,82 @@ const char* SERVER_CERTIFICATE =
 "-----BEGIN CERTIFICATE-----\n"
 "PASTE_YOUR_CERTIFICATE_CONTENT_HERE\n"
 "-----END CERTIFICATE-----\n";
+
+/**
+ * Detect if motion sensor is connected and determine operation mode
+ * Tests the motion sensor pin to see if it responds appropriately
+ */
+String detectOperationMode() {
+  if (FORCE_ALWAYS_ON_MODE) {
+    Serial.println("Force always-on mode enabled");
+    motionSensorDetected = false;
+    return "always-on";
+  }
+  
+  // Test motion sensor presence
+  Serial.println("Testing motion sensor presence...");
+  
+  // Configure pin as input with pulldown
+  pinMode(MOTION_SENSOR_PIN, INPUT_PULLDOWN);
+  delay(100);
+  
+  // Read initial state
+  int initialReading = digitalRead(MOTION_SENSOR_PIN);
+  delay(100);
+  
+  // Configure as input with pullup and test again
+  pinMode(MOTION_SENSOR_PIN, INPUT_PULLUP);
+  delay(100);
+  int pullupReading = digitalRead(MOTION_SENSOR_PIN);
+  
+  // Restore normal input mode
+  pinMode(MOTION_SENSOR_PIN, INPUT);
+  delay(100);
+  
+  // If readings are significantly different, sensor is likely connected
+  if (initialReading != pullupReading) {
+    motionSensorDetected = true;
+    Serial.println("Motion sensor detected - using motion-triggered mode");
+    return "motion-triggered";
+  } else {
+    motionSensorDetected = false;
+    Serial.println("No motion sensor detected - using always-on mode");
+    return "always-on";
+  }
+}
+
+/**
+ * Configure operation mode based on detection or stored setting
+ */
+void configureOperationMode() {
+  String detectedMode;
+  
+  // If operation mode is already set and not auto-detect, use it
+  if (strcmp(operationMode, "auto-detect") != 0 && strcmp(operationMode, "") != 0) {
+    detectedMode = String(operationMode);
+    Serial.printf("Using stored operation mode: %s\n", operationMode);
+  } else {
+    // Auto-detect operation mode
+    detectedMode = detectOperationMode();
+    strcpy(operationMode, detectedMode.c_str());
+  }
+  
+  // Configure based on operation mode
+  if (detectedMode == "continuous") {
+    continuousMode = true;
+    currentStreamingDuration = 0; // Unlimited
+    Serial.println("Configured for continuous streaming mode");
+  } else if (detectedMode == "always-on") {
+    continuousMode = false;
+    currentStreamingDuration = ALWAYS_ON_STREAMING_DURATION;
+    Serial.printf("Configured for always-on mode (%lu ms streaming)\n", currentStreamingDuration);
+  } else {
+    // motion-triggered (default)
+    continuousMode = false;
+    currentStreamingDuration = STREAMING_DURATION;
+    Serial.printf("Configured for motion-triggered mode (%lu ms streaming)\n", currentStreamingDuration);
+  }
+}
 
 /**
  * Initialize camera with AI-Thinker specific configuration
@@ -254,8 +344,12 @@ bool registerWithServer() {
   }
   
   // Create registration JSON
-  StaticJsonDocument<200> registrationDoc;
+  StaticJsonDocument<300> registrationDoc;
   registrationDoc["deviceId"] = WiFi.macAddress();
+  registrationDoc["operationMode"] = operationMode;
+  registrationDoc["motionSensorDetected"] = motionSensorDetected;
+  registrationDoc["firmwareVersion"] = "1.1.0";
+  registrationDoc["capabilities"] = "camera,motion,sleep";
   
   String jsonString;
   serializeJson(registrationDoc, jsonString);
@@ -437,6 +531,14 @@ void handleServerCommand(JsonObject command) {
     Serial.println("Server requested streaming stop");
     isStreaming = false;
   }
+  else if (strcmp(action, "update_operation_mode") == 0) {
+    const char* newMode = command["operationMode"];
+    if (newMode) {
+      strcpy(operationMode, newMode);
+      Serial.printf("Operation mode updated to: %s\n", operationMode);
+      configureOperationMode();
+    }
+  }
   else if (strcmp(action, "reboot") == 0) {
     Serial.println("Server requested reboot");
     ESP.restart();
@@ -572,6 +674,7 @@ void enterDeepSleep() {
     StaticJsonDocument<100> sleepDoc;
     sleepDoc["type"] = "status_update";
     sleepDoc["status"] = "entering_sleep";
+    sleepDoc["operationMode"] = operationMode;
     
     String sleepMessage;
     serializeJson(sleepDoc, sleepMessage);
@@ -586,10 +689,29 @@ void enterDeepSleep() {
   // Update total uptime
   totalUptime += millis();
   
-  // Configure wake-up source (motion sensor on GPIO 13)
-  esp_sleep_enable_ext0_wakeup((gpio_num_t)MOTION_SENSOR_PIN, HIGH);
+  // Configure wake-up based on operation mode
+  if (strcmp(operationMode, "continuous") == 0) {
+    Serial.println("Continuous mode - not entering deep sleep");
+    // Don't sleep in continuous mode, just restart streaming
+    delay(1000);
+    return;
+  }
+  else if (strcmp(operationMode, "always-on") == 0) {
+    // Always-on mode: sleep for configured interval, then wake with timer
+    Serial.printf("Always-on mode - sleeping for %lu ms\n", ALWAYS_ON_SLEEP_DURATION);
+    esp_sleep_enable_timer_wakeup(ALWAYS_ON_SLEEP_DURATION * 1000); // Convert to microseconds
+  }
+  else if (motionSensorDetected) {
+    // Motion-triggered mode: wake on motion sensor
+    Serial.println("Motion-triggered mode - sleeping until motion detected");
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)MOTION_SENSOR_PIN, HIGH);
+  }
+  else {
+    // Fallback: timer wake-up if no motion sensor
+    Serial.println("No motion sensor - using timer wake-up");
+    esp_sleep_enable_timer_wakeup(ALWAYS_ON_SLEEP_DURATION * 1000);
+  }
   
-  Serial.println("Entering deep sleep... Wake on motion detection.");
   Serial.flush();
   
   // Enter deep sleep
@@ -598,10 +720,13 @@ void enterDeepSleep() {
 
 /**
  * Check if streaming duration has expired
- * Returns true if streaming time limit reached
+ * Returns true if streaming time limit reached (unless in continuous mode)
  */
 bool isStreamingTimeExpired() {
-  return (millis() - streamingStartTime) > STREAMING_DURATION;
+  if (continuousMode || currentStreamingDuration == 0) {
+    return false; // Never expire in continuous mode
+  }
+  return (millis() - streamingStartTime) > currentStreamingDuration;
 }
 
 /**
@@ -629,7 +754,7 @@ void setup() {
       Serial.println("Woke up from motion detection");
       break;
     case ESP_SLEEP_WAKEUP_TIMER:
-      Serial.println("Woke up from timer");
+      Serial.println("Woke up from timer (always-on mode)");
       break;
     case ESP_SLEEP_WAKEUP_UNDEFINED:
     default:
@@ -638,9 +763,15 @@ void setup() {
       isRegistered = false;
       memset(serverIP, 0, sizeof(serverIP));
       memset(apiKey, 0, sizeof(apiKey));
+      memset(operationMode, 0, sizeof(operationMode));
+      strcpy(operationMode, "auto-detect");
       serverPort = 0;
+      motionSensorDetected = false;
       break;
   }
+  
+  // Configure operation mode early
+  configureOperationMode();
   
   // Initialize GPIO pins
   pinMode(MOTION_SENSOR_PIN, INPUT);

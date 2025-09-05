@@ -4,10 +4,14 @@ Arduino code for ESP32-CAM AI-Thinker boards that connects to the Pi Camera Serv
 
 ## Features
 
+- **Multiple Operation Modes**: 
+  - Motion-triggered (with PIR sensor)
+  - Always-on (without motion sensor)
+  - Continuous (non-stop streaming)
+- **Auto-Detection**: Automatically detects hardware and configures mode
 - **Automatic Server Discovery**: Uses mDNS to find the Pi Camera Server
 - **Secure Registration**: Automatic device registration with API key authentication
 - **TLS Encryption**: All communications encrypted with TLS/SSL
-- **Motion-Triggered Wake**: Deep sleep with wake on motion detection
 - **Power Efficient**: Optimized for battery operation with deep sleep
 - **Configurable Settings**: Camera settings controlled remotely by server
 - **Real-time Streaming**: WebSocket-based video streaming
@@ -20,8 +24,9 @@ Arduino code for ESP32-CAM AI-Thinker boards that connects to the Pi Camera Serv
 - MicroSD card slot (optional, for local storage)
 - Built-in camera and LED
 
-### Motion Sensor
-- PIR motion sensor (HC-SR501 or similar)
+### Motion Sensor (Optional)
+- PIR motion sensor (HC-SR501 or similar) - **Optional for motion-triggered mode**
+- If not connected, device automatically operates in always-on mode
 - Connect VCC to 3.3V
 - Connect GND to GND  
 - Connect OUT to GPIO 13
@@ -91,9 +96,11 @@ Select the following settings in Arduino IDE:
 ## Installation and Configuration
 
 ### Step 1: Hardware Assembly
-1. Connect PIR motion sensor to GPIO 13
+1. **Optional**: Connect PIR motion sensor to GPIO 13 for motion-triggered mode
 2. Ensure stable 3.3V power supply
 3. Insert programmed ESP32-CAM into camera housing
+
+> **Note**: If no motion sensor is connected, the device will automatically operate in always-on mode with timer-based wake-up every 5 minutes.
 
 ### Step 2: Code Configuration
 1. **WiFi Credentials**: Update these lines in the code:
@@ -179,6 +186,28 @@ cameraConfig.fb_count = 2;                 // Frame buffers
 ```
 
 ## Operation Modes
+
+The ESP32-CAM client automatically detects the available hardware and configures the appropriate operation mode:
+
+### Motion-Triggered Mode
+- **Hardware Required**: PIR motion sensor connected to GPIO 13
+- **Behavior**: Deep sleep until motion detected, then streams for 30 seconds
+- **Power Consumption**: <10µA in sleep mode
+- **Best For**: Battery-powered installations with motion detection needs
+
+### Always-On Mode  
+- **Hardware Required**: ESP32-CAM only (no motion sensor)
+- **Behavior**: Timer-based wake-up every 5 minutes, streams for 30 seconds
+- **Power Consumption**: Higher than motion-triggered mode
+- **Best For**: Powered installations without motion sensor hardware
+
+### Continuous Mode
+- **Hardware Required**: ESP32-CAM only
+- **Behavior**: Non-stop streaming (no sleep)
+- **Power Consumption**: Highest
+- **Best For**: Critical monitoring areas with constant power
+
+> **Auto-Detection**: The device automatically detects if a motion sensor is connected during startup and configures the appropriate mode. No code changes required.
 
 ### Cold Boot Sequence
 1. Hardware initialization

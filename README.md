@@ -32,7 +32,10 @@ A complete, secure wireless camera system consisting of a Raspberry Pi 5 host se
 
 ### ESP32-CAM Clients
 - **Motion-Triggered Recording**: PIR sensor integration
-- **Power Efficient**: Deep sleep with wake-on-motion
+- **Always-On Mode**: Continuous monitoring without motion sensor
+- **Continuous Mode**: Non-stop streaming for critical areas
+- **Auto-Detection**: Automatically detects hardware and configures mode
+- **Power Efficient**: Deep sleep with wake-on-motion or timer
 - **Auto-Discovery**: Finds server via mDNS
 - **Secure Registration**: API key authentication
 - **Real-time Streaming**: JPEG over WebSocket
