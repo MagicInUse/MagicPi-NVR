@@ -122,6 +122,20 @@ const Dashboard: React.FC = () => {
 
   const handleWebSocketMessage = (message: { type: string; [key: string]: unknown }) => {
     switch (message.type) {
+      case 'welcome':
+        console.log('WebSocket welcome message received:', message);
+        break;
+      case 'device_list':
+        console.log('Device list update received:', message);
+        // Refresh the device list when server sends updated device info
+        fetchDevices();
+        break;
+      case 'device_update':
+        console.log('Device update received:', message);
+        if (typeof message.deviceId === 'string' && typeof message.status === 'string') {
+          updateDeviceStatus(message.deviceId, message.status);
+        }
+        break;
       case 'device_status_update':
         if (typeof message.deviceId === 'string' && typeof message.status === 'string') {
           updateDeviceStatus(message.deviceId, message.status);
@@ -212,7 +226,9 @@ const Dashboard: React.FC = () => {
 
   const startDeviceStream = async (deviceId: string) => {
     try {
-      const response = await axios.post(`/api/dashboard/devices/${deviceId}/stream/start`, {}, {
+      // URL encode the device ID to handle colons and other special characters
+      const encodedDeviceId = encodeURIComponent(deviceId);
+      const response = await axios.post(`/api/dashboard/devices/${encodedDeviceId}/stream/start`, {}, {
         headers: {
           'X-API-Key': 'frontend-access'
         }
@@ -240,7 +256,9 @@ const Dashboard: React.FC = () => {
 
   const stopDeviceStream = async (deviceId: string) => {
     try {
-      const response = await axios.post(`/api/dashboard/devices/${deviceId}/stream/stop`, {}, {
+      // URL encode the device ID to handle colons and other special characters
+      const encodedDeviceId = encodeURIComponent(deviceId);
+      const response = await axios.post(`/api/dashboard/devices/${encodedDeviceId}/stream/stop`, {}, {
         headers: {
           'X-API-Key': 'frontend-access'
         }
