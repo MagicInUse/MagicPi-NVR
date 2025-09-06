@@ -38,6 +38,7 @@ class PiCameraServer {
   private cleanupService: CleanupService;
   private apiRoutes: ApiRoutes;
   private frontendClients: Set<WebSocket> = new Set();
+  private frontendStreamSubscriptions: Map<string, Set<WebSocket>> = new Map();
 
   constructor() {
     this.app = express();
@@ -520,6 +521,9 @@ class PiCameraServer {
           console.log(`Recording started for device: ${deviceId}`);
         }
         this.videoProcessor.writeFrame(deviceId, data);
+        
+        // Forward frame to subscribed frontend clients
+        this.forwardVideoFrameToFrontend(deviceId, data);
       } else {
         // This is a text message (JSON command)
         try {
@@ -814,11 +818,85 @@ class PiCameraServer {
           }
           break;
           
+        case 'subscribe':
+          if (message.deviceId) {
+            this.handleStreamSubscription(message.deviceId, ws);
+          }
+          break;
+          
         default:
           console.warn('Unknown frontend message type:', message.type);
       }
     } catch (error) {
       console.error('Error handling frontend message:', error);
+    }
+  }
+
+  /**
+   * Handle stream subscription from frontend
+   */
+  private handleStreamSubscription(deviceId: string, frontendWs: WebSocket): void {
+    try {
+      console.log(`Frontend subscribing to stream for device: ${deviceId}`);
+      
+      // Store the frontend WebSocket connection for this device stream
+      if (!this.frontendStreamSubscriptions) {
+        this.frontendStreamSubscriptions = new Map();
+      }
+      
+      if (!this.frontendStreamSubscriptions.has(deviceId)) {
+        this.frontendStreamSubscriptions.set(deviceId, new Set());
+      }
+      
+      this.frontendStreamSubscriptions.get(deviceId)?.add(frontendWs);
+      
+      // Send confirmation to frontend
+      frontendWs.send(JSON.stringify({
+        type: 'stream_subscription_confirmed',
+        deviceId: deviceId,
+        message: `Subscribed to stream for device ${deviceId}`
+      }));
+      
+      console.log(`Frontend subscribed to stream for device: ${deviceId}`);
+    } catch (error) {
+      console.error('Error handling stream subscription:', error);
+    }
+  }
+
+  /**
+   * Forward video frame to subscribed frontend clients
+   */
+  private forwardVideoFrameToFrontend(deviceId: string, frameData: Buffer): void {
+    try {
+      const subscribers = this.frontendStreamSubscriptions.get(deviceId);
+      if (!subscribers || subscribers.size === 0) {
+        return; // No subscribers for this device
+      }
+
+      // Remove closed connections
+      const closedConnections: WebSocket[] = [];
+      subscribers.forEach(ws => {
+        if (ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+          closedConnections.push(ws);
+        }
+      });
+      
+      closedConnections.forEach(ws => subscribers.delete(ws));
+
+      // Send frame to active subscribers
+      subscribers.forEach(ws => {
+        if (ws.readyState === WebSocket.OPEN) {
+          try {
+            // Send binary JPEG frame directly
+            ws.send(frameData);
+          } catch (sendError) {
+            console.error(`Error sending frame to frontend client:`, sendError);
+            subscribers.delete(ws);
+          }
+        }
+      });
+    } catch (error) {
+      console.error('Error forwarding video frame to frontend:', error);
     }
   }
 

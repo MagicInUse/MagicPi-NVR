@@ -1,6 +1,15 @@
 # 🎥 MagicPi NVR - Network Video Recorder
 
-A high-performance surveillance system featuring **binary JPEG streaming** from ESP32-CAM devices to a centralized Node.js server with real-time video recording and React frontend dashboard.
+A high-performance surveillance system featuring **real-time binary JPEG streaming** from ESP32-CAM devices with live frontend video display, centralized recording, and complete web dashboard control.
+
+## ✨ Key Features
+
+🔴 **Live Video Streaming** - Real-time JPEG frames via WebSocket binary streaming  
+📹 **H.264 Recording** - FFmpeg transcoding with automatic file management  
+🎛️ **Web Dashboard** - React frontend with device control and live video display  
+🔐 **Secure HTTPS** - SSL encryption for all communications  
+⚡ **Real-time Status** - Device heartbeats, connection monitoring, and status updates  
+🎯 **ESP32-CAM Support** - Optimized for ESP32-CAM binary streaming protocol  
 
 ## 🚀 Quick Start
 
@@ -202,16 +211,37 @@ graph LR
 wsClient.sendBinary((const char*)frameBuffer->buf, frameBuffer->len);
 ```
 
-#### 2. Server-side JPEG Detection
+#### 2. Server-side JPEG Detection & Live Streaming
 ```typescript
 // Detect JPEG magic numbers (0xFF, 0xD8)
 if (data[0] === 0xFF && data[1] === 0xD8) {
-    // Process as binary JPEG frame
+    // Process as binary JPEG frame for recording
     await this.videoProcessor.writeFrame(deviceId, data);
+    
+    // Forward frame to subscribed frontend clients for live viewing
+    this.forwardVideoFrameToFrontend(deviceId, data);
 }
 ```
 
-#### 3. FFmpeg Stream Processing
+#### 3. Frontend Live Video Subscription
+```typescript
+// Subscribe to live video stream
+const subscribeMessage = {
+    type: 'subscribe',
+    deviceId: deviceId
+};
+this.ws.send(JSON.stringify(subscribeMessage));
+
+// Handle incoming video frames
+ws.onmessage = (event) => {
+    if (event.data instanceof ArrayBuffer) {
+        // Display live JPEG frame in video player
+        this.handleVideoFrame(new Uint8Array(event.data));
+    }
+};
+```
+
+#### 4. FFmpeg Stream Processing
 ```typescript
 // Direct MJPEG input from WebSocket stream
 ffmpeg()
@@ -226,18 +256,22 @@ ffmpeg()
 ### Performance Benefits
 
 - **Zero JSON Overhead**: Raw binary transmission eliminates parsing delays
+- **Real-time Live Streaming**: JPEG frames forwarded directly to frontend via WebSocket
 - **Direct Stream Processing**: JPEG frames pipe directly to FFmpeg without intermediate storage
-- **Real-time Encoding**: H.264 encoding with ultrafast presets for minimal latency
+- **Dual Output**: Simultaneous live viewing and H.264 recording from single stream
 - **Memory Efficient**: PassThrough streams prevent buffer accumulation
 
-### Recording Pipeline
+### Live Streaming Pipeline
 
 1. **Frame Capture**: ESP32-CAM captures JPEG at configured quality
-2. **Binary Transmission**: Raw frame data sent via WebSocket
+2. **Binary Transmission**: Raw frame data sent via WebSocket to server
 3. **Magic Number Detection**: Server identifies JPEG vs command data
-4. **Stream Processing**: Data flows through PassThrough stream to FFmpeg
-5. **H.264 Encoding**: Real-time conversion to MP4 with configurable settings
-6. **File Management**: Automatic directory creation and file rotation
+4. **Dual Processing**: 
+   - **Live Stream**: Frame forwarded to subscribed frontend clients
+   - **Recording**: Frame written to FFmpeg PassThrough stream
+5. **Frontend Display**: Browser receives binary JPEG and displays in real-time
+6. **H.264 Recording**: Simultaneous conversion to MP4 with configurable settings
+7. **File Management**: Automatic directory creation and file rotation
 
 ## �🚨 Troubleshooting
 

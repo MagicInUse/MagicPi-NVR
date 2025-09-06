@@ -25,7 +25,13 @@ export class ApiRoutes {
     this.router.get('/dashboard/devices', this.controller.getDevices);
     this.router.get('/dashboard/recordings', this.controller.getRecordings);
     this.router.get('/dashboard/stats', this.controller.getSystemStats);
-    this.router.post('/dashboard/devices/:deviceId/stream/start', this.controller.startDeviceStream);
+    
+    // Add middleware logging for stream start route
+    this.router.post('/dashboard/devices/:deviceId/stream/start', (req, res, next) => {
+      console.log('Stream start route hit:', req.params);
+      next();
+    }, this.controller.startDeviceStream);
+    
     this.router.post('/dashboard/devices/:deviceId/stream/stop', this.controller.stopDeviceStream);
     this.router.delete('/dashboard/recordings/:deviceId/:date/:filename', this.controller.deleteRecording);
 

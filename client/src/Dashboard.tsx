@@ -238,7 +238,7 @@ const Dashboard: React.FC = () => {
         // Subscribe to video stream via WebSocket
         if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
           wsConnection.send(JSON.stringify({
-            action: 'subscribe',
+            type: 'subscribe',
             deviceId: deviceId
           }));
           

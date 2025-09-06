@@ -55,6 +55,7 @@ export class ApiController {
       const { deviceId: rawDeviceId } = req.params;
       
       if (!rawDeviceId) {
+        console.log('No device ID provided');
         res.status(400).json({
           success: false,
           error: 'Device ID is required'
@@ -64,10 +65,17 @@ export class ApiController {
 
       // URL decode the device ID to handle colons properly
       const deviceId = decodeURIComponent(rawDeviceId);
+      console.log('Decoded device ID:', deviceId);
+      
+      // Debug: List all registered devices
+      const allDevices = this.deviceManager.getAllDevices();
+      console.log('All registered devices:', allDevices.map(d => d.deviceId));
 
-      const device = this.deviceManager.getDevice(deviceId);
+      const device = this.deviceManager.getDeviceById(deviceId);
+      console.log('Device found:', !!device);
 
       if (!device) {
+        console.log('Device not found, returning 404');
         res.status(404).json({
           success: false,
           error: 'Device not found'
@@ -87,6 +95,7 @@ export class ApiController {
 
       // Send wake-up command to ESP32 if WebSocket is available
       if (device.socket && device.socket.readyState === device.socket.OPEN) {
+        console.log('Sending wake command to device');
         const wakeCommand = {
           action: 'wake_and_stream',
           duration: req.body.duration || 30000, // Default 30 seconds
@@ -99,6 +108,7 @@ export class ApiController {
         // Update device status
         this.deviceManager.updateDeviceStatus(deviceId, DeviceStatus.STREAMING);
 
+        console.log('Sending success response');
         res.json({
           success: true,
           message: `Stream started for device ${deviceId}`,
@@ -106,7 +116,7 @@ export class ApiController {
           duration: wakeCommand.duration
         });
       } else {
-        console.log(`Device ${deviceId} WebSocket not available, but allowing stream start anyway`);
+        console.log('WebSocket not available, sending alternative response');
         
         // Update device status anyway since ESP32 is sending data
         this.deviceManager.updateDeviceStatus(deviceId, DeviceStatus.STREAMING);
@@ -119,7 +129,7 @@ export class ApiController {
         });
       }
     } catch (error) {
-      console.error('Error starting device stream:', error);
+      console.error('Error in startDeviceStream:', error);
       res.status(500).json({
         success: false,
         error: 'Failed to start stream'
@@ -132,9 +142,9 @@ export class ApiController {
    */
   public stopDeviceStream = async (req: Request, res: Response): Promise<void> => {
     try {
-      const { deviceId } = req.params;
+      const { deviceId: rawDeviceId } = req.params;
       
-      if (!deviceId) {
+      if (!rawDeviceId) {
         res.status(400).json({
           success: false,
           error: 'Device ID is required'
@@ -142,7 +152,9 @@ export class ApiController {
         return;
       }
 
-      const device = this.deviceManager.getDevice(deviceId);
+      // URL decode the device ID to handle colons properly
+      const deviceId = decodeURIComponent(rawDeviceId);
+      const device = this.deviceManager.getDeviceById(deviceId);
 
       if (!device) {
         res.status(404).json({
