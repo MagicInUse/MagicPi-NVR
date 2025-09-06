@@ -5,6 +5,7 @@
 
 import express from 'express';
 import https from 'https';
+import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Responder } from '@homebridge/ciao';
 import { promises as fs } from 'fs';
@@ -17,6 +18,8 @@ import { DeviceManager, DeviceStatus } from './services/DeviceManager.js';
 import { VideoProcessor } from './services/VideoProcessor.js';
 import { CleanupService } from './services/CleanupService.js';
 import { validateApiKey, validateWebSocketApiKey, getDeviceIdFromApiKey } from './middleware/auth.js';
+import { ApiRoutes } from './api/routes.js';
+import path from 'path';
 
 /**
  * Main server class
@@ -24,18 +27,22 @@ import { validateApiKey, validateWebSocketApiKey, getDeviceIdFromApiKey } from '
 class PiCameraServer {
   private app: express.Application;
   private server: https.Server | null = null;
+  private httpServer: http.Server | null = null;
   private wsServer: WebSocketServer | null = null;
   private mdnsResponder: Responder | null = null;
   private mdnsService: any = null;
   private deviceManager: DeviceManager;
   private videoProcessor: VideoProcessor;
   private cleanupService: CleanupService;
+  private apiRoutes: ApiRoutes;
+  private frontendClients: Set<WebSocket> = new Set();
 
   constructor() {
     this.app = express();
     this.deviceManager = DeviceManager.getInstance();
     this.videoProcessor = new VideoProcessor();
     this.cleanupService = new CleanupService();
+    this.apiRoutes = new ApiRoutes();
     
     this.setupMiddleware();
     this.setupRoutes();
@@ -73,17 +80,32 @@ class PiCameraServer {
    * Setup Express routes
    */
   private setupRoutes(): void {
-    // Health check endpoint
-    this.app.get('/health', (req, res) => {
-      res.json({
-        status: 'healthy',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime(),
-        version: '1.0.0'
-      });
-    });
+    // API Routes - all endpoints prefixed with /api
+    this.app.use('/api', this.apiRoutes.getRouter());
 
-    // Device registration endpoint
+    // Static video serving with range request support
+    this.app.use('/videos', express.static(config.recordings.directory, {
+      acceptRanges: true,
+      etag: true,
+      lastModified: true
+    }));
+
+    // Serve React frontend - check for deployed frontend first, then dev location
+    const deployedFrontendPath = path.join(__dirname, './client');
+    const devFrontendPath = path.join(__dirname, '../../client/dist');
+    
+    let frontendPath = deployedFrontendPath;
+    try {
+      require('fs').accessSync(deployedFrontendPath);
+      console.log('Using deployed frontend from:', deployedFrontendPath);
+    } catch {
+      frontendPath = devFrontendPath;
+      console.log('Using development frontend from:', devFrontendPath);
+    }
+    
+    this.app.use(express.static(frontendPath));
+
+    // Legacy device registration endpoint (keep for backward compatibility)
     this.app.post('/register', async (req, res) => {
       try {
         const { deviceId, operationMode, motionSensorDetected, firmwareVersion, capabilities } = req.body;
@@ -115,7 +137,7 @@ class PiCameraServer {
         // Log registration details
         console.log(`Device registered: ${deviceId}, Mode: ${operationMode || 'default'}, Motion Sensor: ${motionSensorDetected || false}`);
 
-        res.json({
+        return res.json({
           success: true,
           apiKey: result.apiKey,
           config: result.config,
@@ -127,7 +149,7 @@ class PiCameraServer {
         });
       } catch (error) {
         console.error('Registration error:', error);
-        res.status(500).json({
+        return res.status(500).json({
           error: 'Internal Server Error',
           message: 'Failed to register device'
         });
@@ -145,7 +167,7 @@ class PiCameraServer {
           });
         }
 
-        res.json({
+        return res.json({
           deviceId: device.deviceId,
           status: device.status,
           config: device.config,
@@ -155,7 +177,7 @@ class PiCameraServer {
         });
       } catch (error) {
         console.error('Error getting device status:', error);
-        res.status(500).json({
+        return res.status(500).json({
           error: 'Internal Server Error',
           message: 'Failed to get device status'
         });
@@ -176,13 +198,13 @@ class PiCameraServer {
 
         this.deviceManager.updateDeviceConfig(req.device.id, newConfig);
 
-        res.json({
+        return res.json({
           success: true,
           message: 'Configuration updated successfully'
         });
       } catch (error) {
         console.error('Error updating device config:', error);
-        res.status(500).json({
+        return res.status(500).json({
           error: 'Internal Server Error',
           message: 'Failed to update configuration'
         });
@@ -242,12 +264,41 @@ class PiCameraServer {
       }
     });
 
-    // 404 handler
-    this.app.use('*', (req, res) => {
-      res.status(404).json({
-        error: 'Not Found',
-        message: 'Endpoint not found'
+    // SPA fallback - serve React app for all non-API routes
+    this.app.get('*', (req, res) => {
+      // Don't serve React for API routes or asset requests
+      if (req.path.startsWith('/api') || req.path.startsWith('/videos') || req.path.includes('.')) {
+        return res.status(404).json({
+          error: 'Not Found',
+          message: 'Endpoint not found'
+        });
+      }
+      
+      // Serve React index.html for all other routes (SPA routing)
+      // Use the same frontend path logic as above
+      const deployedIndexPath = path.join(__dirname, './client/index.html');
+      const devIndexPath = path.join(__dirname, '../../client/dist/index.html');
+      
+      let indexPath = deployedIndexPath;
+      try {
+        require('fs').accessSync(deployedIndexPath);
+      } catch {
+        indexPath = devIndexPath;
+      }
+      
+      res.sendFile(indexPath, (err) => {
+        if (err) {
+          console.error('Error serving React app:', err);
+          if (!res.headersSent) {
+            res.status(500).json({
+              error: 'Internal Server Error',
+              message: 'Failed to serve application'
+            });
+          }
+        }
+        return;
       });
+      return;
     });
 
     // Error handler
@@ -264,17 +315,37 @@ class PiCameraServer {
    * Setup WebSocket server for real-time communication
    */
   private setupWebSocketServer(): void {
-    if (!this.server) {
-      throw new Error('HTTPS server must be created before WebSocket server');
+    if (!this.httpServer) {
+      throw new Error('HTTP server must be created before WebSocket server');
     }
 
     this.wsServer = new WebSocketServer({
-      server: this.server,
+      server: this.httpServer,
       path: '/ws',
-      verifyClient: (info) => {
-        // Extract API key from headers
-        const apiKey = info.req.headers['x-api-key'] as string;
-        return validateWebSocketApiKey(apiKey);
+      
+      // Disable per-message-deflate compression to ensure protocol compatibility
+      perMessageDeflate: false,
+      
+      verifyClient: (info: any) => {
+        // Check for API key in headers or query parameters
+        const apiKey = info.req.headers['x-api-key'] as string || 
+                      new URL(`https://dummy${info.req.url}`).searchParams.get('apiKey');
+        
+        // Check if this is a frontend client by origin or referer
+        const origin = info.req.headers.origin || info.req.headers.referer;
+        const isFrontendClient = origin && (
+          origin.includes(info.req.headers.host) || 
+          origin.startsWith('https://localhost') ||
+          origin.startsWith('http://localhost')
+        );
+        
+        // Allow frontend clients from the same origin without API key
+        if (isFrontendClient) {
+          return true;
+        }
+        
+        // For device clients, validate API key
+        return apiKey ? validateWebSocketApiKey(apiKey) : false;
       }
     });
 
@@ -290,53 +361,122 @@ class PiCameraServer {
    */
   private handleWebSocketConnection(ws: WebSocket, request: IncomingMessage): void {
     try {
-      // Extract API key and get device ID
+      // Determine client type based on origin and API key presence
+      const origin = request.headers.origin || request.headers.referer;
       const apiKey = request.headers['x-api-key'] as string;
-      const deviceId = getDeviceIdFromApiKey(apiKey);
-
-      if (!deviceId) {
-        console.warn('WebSocket connection rejected: invalid API key');
-        ws.close(1008, 'Invalid API key');
-        return;
+      
+      const isFrontendClient = origin && (
+        origin.includes(request.headers.host || '') || 
+        origin.startsWith('https://localhost') ||
+        origin.startsWith('http://localhost')
+      );
+      
+      if (isFrontendClient && !apiKey) {
+        // Handle frontend client connection
+        this.handleFrontendConnection(ws, request);
+      } else {
+        // Handle device client connection
+        this.handleDeviceConnection(ws, request);
       }
-
-      console.log(`WebSocket connection established for device: ${deviceId}`);
-
-      // Associate WebSocket with device
-      this.deviceManager.setSocket(deviceId, ws);
-
-      // Start recording for this device
-      this.startRecordingForDevice(deviceId, ws);
-
-      // Handle incoming messages
-      ws.on('message', async (data: Buffer) => {
-        await this.handleWebSocketMessage(deviceId, data);
-      });
-
-      // Handle connection close
-      ws.on('close', (code: number, reason: Buffer) => {
-        console.log(`WebSocket closed for device ${deviceId}: ${code} - ${reason.toString()}`);
-        this.handleWebSocketClose(deviceId);
-      });
-
-      // Handle errors
-      ws.on('error', (error: Error) => {
-        console.error(`WebSocket error for device ${deviceId}:`, error);
-        this.handleWebSocketClose(deviceId);
-      });
-
-      // Send welcome message
-      ws.send(JSON.stringify({
-        type: 'welcome',
-        message: 'Connected to Pi Camera Server',
-        deviceId: deviceId,
-        timestamp: new Date().toISOString()
-      }));
-
     } catch (error) {
       console.error('Error handling WebSocket connection:', error);
       ws.close(1011, 'Server error');
     }
+  }
+
+  /**
+   * Handle frontend client WebSocket connection
+   */
+  private handleFrontendConnection(ws: WebSocket, request: IncomingMessage): void {
+    console.log('Frontend client connected via WebSocket');
+    
+    // Add to frontend clients set
+    this.frontendClients.add(ws);
+    
+    // Send initial data
+    ws.send(JSON.stringify({
+      type: 'welcome',
+      message: 'Connected to Pi Camera Server',
+      clientType: 'frontend',
+      timestamp: new Date().toISOString()
+    }));
+    
+    // Send current device list
+    this.sendDeviceListToFrontend(ws);
+    
+    // Handle frontend messages
+    ws.on('message', (data: Buffer) => {
+      this.handleFrontendMessage(ws, data);
+    });
+    
+    // Handle frontend disconnect
+    ws.on('close', () => {
+      console.log('Frontend client disconnected');
+      this.frontendClients.delete(ws);
+    });
+    
+    ws.on('error', (error: Error) => {
+      console.error('Frontend WebSocket error:', error);
+      this.frontendClients.delete(ws);
+    });
+  }
+
+  /**
+   * Handle device client WebSocket connection
+   */
+  private handleDeviceConnection(ws: WebSocket, request: IncomingMessage): void {
+    // Extract API key and get device ID
+    const apiKey = request.headers['x-api-key'] as string ||
+                   new URL(`https://dummy${request.url}`).searchParams.get('apiKey') || '';
+    const deviceId = getDeviceIdFromApiKey(apiKey);
+
+    if (!deviceId) {
+      console.warn('Device WebSocket connection rejected: invalid API key');
+      ws.close(1008, 'Invalid API key');
+      return;
+    }
+
+    console.log(`Device WebSocket connection established: ${deviceId}`);
+
+    // Associate WebSocket with device
+    this.deviceManager.setSocket(deviceId, ws);
+
+    // Send welcome message now that ESP32 can handle incoming messages properly
+    console.log(`Device WebSocket ready for streaming: ${deviceId}`);
+    
+    // Send welcome message to establish proper connection
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'welcome',
+        message: 'WebSocket connection established',
+        deviceId: deviceId,
+        timestamp: new Date().toISOString()
+      }));
+      console.log(`Welcome message sent to device: ${deviceId}`);
+    }
+
+    // Don't start recording immediately - wait for actual video data
+    // this.startRecordingForDevice(deviceId, ws);
+
+    // Handle incoming messages
+    ws.on('message', async (data: Buffer) => {
+      await this.handleWebSocketMessage(deviceId, data);
+    });
+
+    // Handle connection close
+    ws.on('close', (code: number, reason: Buffer) => {
+      console.log(`Device WebSocket closed ${deviceId}: ${code} - ${reason.toString()}`);
+      this.handleWebSocketClose(deviceId);
+    });
+
+    // Handle errors
+    ws.on('error', (error: Error) => {
+      console.error(`Device WebSocket error ${deviceId}:`, error);
+      this.handleWebSocketClose(deviceId);
+    });
+
+    // Notify frontend clients of device status change
+    this.broadcastDeviceUpdate(deviceId);
   }
 
   /**
@@ -348,7 +488,7 @@ class PiCameraServer {
         await this.videoProcessor.startRecording(deviceId);
         console.log(`Recording started for device: ${deviceId}`);
         
-        // Notify device that recording has started
+        // Send recording notification to ESP32
         ws.send(JSON.stringify({
           type: 'recording_started',
           timestamp: new Date().toISOString()
@@ -356,6 +496,7 @@ class PiCameraServer {
       }
     } catch (error) {
       console.error(`Error starting recording for device ${deviceId}:`, error);
+      // Send error message to ESP32
       ws.send(JSON.stringify({
         type: 'error',
         message: 'Failed to start recording',
@@ -369,17 +510,21 @@ class PiCameraServer {
    */
   private async handleWebSocketMessage(deviceId: string, data: Buffer): Promise<void> {
     try {
-      // Check if message is binary (video frame) or text (JSON command)
-      if (data.length > 0 && data[0] === 0xFF && data[1] === 0xD8) {
-        // JPEG frame (binary data starting with FF D8)
+      // Check for JPEG magic numbers (0xFF, 0xD8) to identify a binary video frame
+      if (data.length > 2 && data[0] === 0xFF && data[1] === 0xD8) {
+        // This is a binary JPEG frame
+        if (!this.videoProcessor.isRecording(deviceId)) {
+          await this.videoProcessor.startRecording(deviceId);
+          console.log(`Recording started for device: ${deviceId}`);
+        }
         this.videoProcessor.writeFrame(deviceId, data);
       } else {
-        // Text message (JSON command)
+        // This is a text message (JSON command)
         try {
           const message = JSON.parse(data.toString());
           await this.handleDeviceCommand(deviceId, message);
         } catch (parseError) {
-          console.warn(`Invalid JSON message from device ${deviceId}:`, parseError);
+          console.warn(`Invalid JSON from device ${deviceId}:`, data.toString());
         }
       }
     } catch (error) {
@@ -393,6 +538,9 @@ class PiCameraServer {
   private async handleDeviceCommand(deviceId: string, command: any): Promise<void> {
     try {
       console.log(`Command received from device ${deviceId}:`, command);
+      
+      // Get device to send responses
+      const device = this.deviceManager.getDeviceById(deviceId);
 
       switch (command.type) {
         case 'status_update':
@@ -407,6 +555,15 @@ class PiCameraServer {
             const newStatus = statusMap[command.status];
             if (newStatus) {
               this.deviceManager.updateDeviceStatus(deviceId, newStatus);
+              
+              // Send acknowledgment
+              if (device && device.socket && device.socket.readyState === WebSocket.OPEN) {
+                device.socket.send(JSON.stringify({
+                  type: 'status_ack',
+                  message: 'Status update received',
+                  timestamp: new Date().toISOString()
+                }));
+              }
             }
           }
           break;
@@ -414,6 +571,28 @@ class PiCameraServer {
         case 'heartbeat':
           // Update last seen timestamp
           this.deviceManager.updateDeviceStatus(deviceId, DeviceStatus.ONLINE);
+          
+          // Send heartbeat acknowledgment
+          if (device && device.socket && device.socket.readyState === WebSocket.OPEN) {
+            device.socket.send(JSON.stringify({
+              type: 'heartbeat_ack',
+              message: 'Heartbeat received',
+              timestamp: new Date().toISOString()
+            }));
+          }
+          break;
+
+        case 'ready':
+          console.log(`Device ${deviceId} is ready for messages`);
+          
+          // Send configuration or commands if needed
+          if (device && device.socket && device.socket.readyState === WebSocket.OPEN) {
+            device.socket.send(JSON.stringify({
+              type: 'ready_ack',
+              message: 'Server ready for communication',
+              timestamp: new Date().toISOString()
+            }));
+          }
           break;
 
         case 'error':
@@ -500,6 +679,9 @@ class PiCameraServer {
     try {
       console.log('Starting Pi Camera Server...');
 
+      // Create insecure HTTP server for WebSocket testing
+      this.httpServer = http.createServer(this.app);
+
       // Load SSL certificates
       const { key, cert } = await this.loadSSLCertificates();
 
@@ -509,9 +691,14 @@ class PiCameraServer {
       // Setup WebSocket server
       this.setupWebSocketServer();
 
-      // Start listening
+      // Start listening on both servers
       this.server.listen(config.server.httpsPort, config.server.host, () => {
-        console.log(`Server listening on https://${config.server.host}:${config.server.httpsPort}`);
+        console.log(`HTTPS server listening on https://${config.server.host}:${config.server.httpsPort}`);
+      });
+
+      // Start the HTTP server for WebSocket testing
+      this.httpServer.listen(3000, config.server.host, () => {
+        console.log(`HTTP server for WS listening on http://${config.server.host}:3000`);
       });
 
       // Setup mDNS
@@ -550,6 +737,11 @@ class PiCameraServer {
         this.server.close();
       }
 
+      // Close HTTP server
+      if (this.httpServer) {
+        this.httpServer.close();
+      }
+
       // Stop mDNS
       if (this.mdnsService) {
         await this.mdnsService.destroy();
@@ -561,6 +753,202 @@ class PiCameraServer {
       console.log('Pi Camera Server stopped');
     } catch (error) {
       console.error('Error stopping server:', error);
+    }
+  }
+
+  /**
+   * Send device list to frontend client
+   */
+  private sendDeviceListToFrontend(ws: WebSocket): void {
+    try {
+      const devices = this.deviceManager.getAllDevices().map(device => ({
+        deviceId: device.deviceId,
+        name: device.name || device.deviceId,
+        status: device.status,
+        config: device.config,
+        lastSeen: device.lastSeen,
+        isRecording: device.isRecording,
+        isStreaming: device.status === DeviceStatus.STREAMING,
+        operationMode: device.operationMode || 'continuous'
+      }));
+
+      ws.send(JSON.stringify({
+        type: 'device_list',
+        devices: devices,
+        timestamp: new Date().toISOString()
+      }));
+    } catch (error) {
+      console.error('Error sending device list to frontend:', error);
+    }
+  }
+
+  /**
+   * Handle frontend WebSocket messages
+   */
+  private handleFrontendMessage(ws: WebSocket, data: Buffer): void {
+    try {
+      const message = JSON.parse(data.toString());
+      
+      switch (message.type) {
+        case 'get_devices':
+          this.sendDeviceListToFrontend(ws);
+          break;
+          
+        case 'start_stream':
+          if (message.deviceId) {
+            this.handleStartStreamRequest(message.deviceId, ws);
+          }
+          break;
+          
+        case 'stop_stream':
+          if (message.deviceId) {
+            this.handleStopStreamRequest(message.deviceId, ws);
+          }
+          break;
+          
+        case 'get_recordings':
+          if (message.deviceId) {
+            this.sendRecordingsList(message.deviceId, ws);
+          }
+          break;
+          
+        default:
+          console.warn('Unknown frontend message type:', message.type);
+      }
+    } catch (error) {
+      console.error('Error handling frontend message:', error);
+    }
+  }
+
+  /**
+   * Broadcast device update to all frontend clients
+   */
+  private broadcastDeviceUpdate(deviceId: string): void {
+    try {
+      const device = this.deviceManager.getDeviceById(deviceId);
+      if (!device) return;
+
+      const deviceUpdate = {
+        type: 'device_update',
+        device: {
+          deviceId: device.deviceId,
+          name: device.name || device.deviceId,
+          status: device.status,
+          config: device.config,
+          lastSeen: device.lastSeen,
+          isRecording: device.isRecording,
+          isStreaming: device.status === DeviceStatus.STREAMING,
+          operationMode: device.operationMode || 'continuous'
+        },
+        timestamp: new Date().toISOString()
+      };
+
+      this.frontendClients.forEach(ws => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(deviceUpdate));
+        }
+      });
+    } catch (error) {
+      console.error('Error broadcasting device update:', error);
+    }
+  }
+
+  /**
+   * Handle start stream request from frontend
+   */
+  private async handleStartStreamRequest(deviceId: string, ws: WebSocket): Promise<void> {
+    try {
+      const device = this.deviceManager.getDeviceById(deviceId);
+      if (!device || !device.socket) {
+        ws.send(JSON.stringify({
+          type: 'error',
+          message: 'Device not connected',
+          deviceId: deviceId
+        }));
+        return;
+      }
+
+      // Request device to start streaming
+      device.socket.send(JSON.stringify({
+        type: 'start_stream',
+        timestamp: new Date().toISOString()
+      }));
+
+      ws.send(JSON.stringify({
+        type: 'stream_started',
+        deviceId: deviceId,
+        timestamp: new Date().toISOString()
+      }));
+    } catch (error) {
+      console.error('Error starting stream:', error);
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Failed to start stream',
+        deviceId: deviceId
+      }));
+    }
+  }
+
+  /**
+   * Handle stop stream request from frontend
+   */
+  private async handleStopStreamRequest(deviceId: string, ws: WebSocket): Promise<void> {
+    try {
+      const device = this.deviceManager.getDeviceById(deviceId);
+      if (!device || !device.socket) {
+        ws.send(JSON.stringify({
+          type: 'error',
+          message: 'Device not connected',
+          deviceId: deviceId
+        }));
+        return;
+      }
+
+      // Request device to stop streaming
+      device.socket.send(JSON.stringify({
+        type: 'stop_stream',
+        timestamp: new Date().toISOString()
+      }));
+
+      ws.send(JSON.stringify({
+        type: 'stream_stopped',
+        deviceId: deviceId,
+        timestamp: new Date().toISOString()
+      }));
+    } catch (error) {
+      console.error('Error stopping stream:', error);
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Failed to stop stream',
+        deviceId: deviceId
+      }));
+    }
+  }
+
+  /**
+   * Send recordings list to frontend
+   */
+  private async sendRecordingsList(deviceId: string, ws: WebSocket): Promise<void> {
+    try {
+      const recordings = await this.videoProcessor.listRecordings(deviceId);
+      
+      ws.send(JSON.stringify({
+        type: 'recordings_list',
+        deviceId: deviceId,
+        recordings: recordings.map(recording => ({
+          path: recording,
+          filename: recording.split('/').pop(),
+          url: `/videos/${recording}`
+        })),
+        timestamp: new Date().toISOString()
+      }));
+    } catch (error) {
+      console.error('Error sending recordings list:', error);
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Failed to get recordings',
+        deviceId: deviceId
+      }));
     }
   }
 }

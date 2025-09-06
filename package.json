@@ -1,0 +1,30 @@
+{
+  "name": "magicpi-nvr",
+  "version": "1.0.0",
+  "description": "Full-stack surveillance system for Raspberry Pi",
+  "scripts": {
+    "build": "cd pi-cam-server && npm run build:deploy",
+    "start": "cd pi-cam-server && npm start",
+    "start:dev": "cd pi-cam-server && npm run start:dev",
+    "dev:frontend": "cd client && npm run dev",
+    "dev:backend": "cd pi-cam-server && npm run dev",
+    "install:all": "npm install && cd client && npm install && cd ../pi-cam-server && npm install",
+    "setup:certs": "cd pi-cam-server && npm run setup:certs",
+    "clean": "cd pi-cam-server && npm run clean && cd ../client && rm -rf dist"
+  },
+  "workspaces": [
+    "client",
+    "pi-cam-server"
+  ],
+  "keywords": [
+    "surveillance",
+    "raspberry-pi",
+    "camera",
+    "nvr",
+    "react",
+    "typescript",
+    "websocket"
+  ],
+  "author": "MagicInUse",
+  "license": "MIT"
+}

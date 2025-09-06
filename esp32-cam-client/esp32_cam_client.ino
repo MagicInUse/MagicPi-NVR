@@ -25,12 +25,11 @@
 #include <WiFiClientSecure.h>
 #include <ESPmDNS.h>
 #include <ArduinoWebsockets.h>
+using namespace websockets;
 #include <ArduinoJson.h>
 #include <esp_camera.h>
 #include <esp_sleep.h>
 #include <esp_system.h>
-
-using namespace websockets;
 
 // ===== CAMERA MODEL CONFIGURATION =====
 #define CAMERA_MODEL_AI_THINKER
@@ -42,27 +41,40 @@ using namespace websockets;
 #define FLASH_PIN 4           // Camera flash pin
 
 // ===== NETWORK CONFIGURATION =====
-const char* WIFI_SSID = "YOUR_WIFI_SSID";        // Replace with your WiFi network name
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD"; // Replace with your WiFi password
+const char* WIFI_SSID = "";        // Replace with your WiFi network name
+const char* WIFI_PASSWORD = ""; // Replace with your WiFi password
+
+// ===== SSL CERTIFICATE FINGERPRINT =====
+const char* SERVER_FINGERPRINT = "";
 
 // ===== MDNS SERVICE DISCOVERY =====
-const char* SERVICE_TYPE = "_mycam-server";
+const char* SERVICE_TYPE = "_mycam-server";  // Fixed: match server mDNS service name
 const char* PROTOCOL = "_tcp";
 const int MDNS_TIMEOUT = 10000; // 10 seconds
+
+// ===== MANUAL SERVER CONFIGURATION (Fallback) =====
+// Set MANUAL_SERVER_CONFIG to true and specify IP/port if mDNS fails
+#define MANUAL_SERVER_CONFIG true
+const char* MANUAL_SERVER_IP = "";  // Replace with your PC's IP
+const int MANUAL_SERVER_PORT = 3443;
 
 // ===== OPERATION MODE CONFIGURATION =====
 // Set to true to force always-on mode (ignores motion sensor)
 // Set to false to auto-detect based on motion sensor presence
-#define FORCE_ALWAYS_ON_MODE false
+#define FORCE_ALWAYS_ON_MODE true
+
+// ===== FORCE RE-REGISTRATION =====
+// Set to true to clear stored API key and force re-registration
+#define FORCE_RE_REGISTRATION true
 
 // Always-on mode settings
 const unsigned long ALWAYS_ON_STREAMING_DURATION = 300000;  // 5 minutes
-const unsigned long ALWAYS_ON_SLEEP_DURATION = 300000;      // 5 minutes between sessions
+const unsigned long ALWAYS_ON_SLEEP_DURATION = 10000;      // 10 seconds between sessions
 const unsigned long CONTINUOUS_MODE_HEARTBEAT = 30000;      // 30 seconds for continuous mode
 
 // ===== STREAMING CONFIGURATION =====
 const unsigned long STREAMING_DURATION = 30000; // 30 seconds of streaming (motion mode)
-const unsigned long FRAME_INTERVAL = 100;       // 100ms between frames (10 fps)
+const unsigned long FRAME_INTERVAL = 1000;      // 1000ms between frames (1 fps) - reduced for testing
 const unsigned long HEARTBEAT_INTERVAL = 5000;  // 5 seconds between heartbeats
 
 // ===== RTC MEMORY VARIABLES (persist through deep sleep) =====
@@ -72,27 +84,28 @@ RTC_DATA_ATTR char apiKey[65] = "";
 RTC_DATA_ATTR bool isRegistered = false;
 RTC_DATA_ATTR int bootCount = 0;
 RTC_DATA_ATTR unsigned long totalUptime = 0;
-RTC_DATA_ATTR char operationMode[20] = "auto-detect";  // "motion-triggered", "always-on", "continuous", "auto-detect"
+RTC_DATA_ATTR char operationMode[20] = "always-on";  // "motion-triggered", "always-on", "continuous", "auto-detect"
 RTC_DATA_ATTR bool motionSensorDetected = false;
 
 // ===== GLOBAL VARIABLES =====
-WiFiClientSecure secureClient;
-WebsocketsClient wsClient;
+WiFiClientSecure secureClient; // We still need this for registration
+WebsocketsClient wsClient;     // Note: Not plural - ArduinoWebsockets library
 camera_config_t cameraConfig;
 bool isStreaming = false;
 unsigned long streamingStartTime = 0;
 unsigned long lastFrameTime = 0;
 unsigned long lastHeartbeatTime = 0;
+unsigned long frameCounter = 0;  // Proper frame counter that resets at reasonable intervals
 unsigned long currentStreamingDuration = STREAMING_DURATION;
 bool continuousMode = false;
 
 // ===== SERVER CERTIFICATE =====
-// Replace this with the contents of your server's cert.pem file
-// Remove the BEGIN/END lines and newlines, create one long string
-const char* SERVER_CERTIFICATE = 
-"-----BEGIN CERTIFICATE-----\n"
-"PASTE_YOUR_CERTIFICATE_CONTENT_HERE\n"
-"-----END CERTIFICATE-----\n";
+// Certificate stored in flash memory to save RAM
+const char SERVER_CERTIFICATE[] PROGMEM = R"EOF(
+-----BEGIN CERTIFICATE-----
+
+-----END CERTIFICATE-----
+)EOF";
 
 /**
  * Detect if motion sensor is connected and determine operation mode
@@ -200,15 +213,15 @@ void initializeCamera() {
   
   // Configure resolution based on PSRAM availability
   if (psramFound()) {
-    cameraConfig.frame_size = FRAMESIZE_SVGA;  // 800x600
-    cameraConfig.jpeg_quality = 10;
-    cameraConfig.fb_count = 2;
-    Serial.println("PSRAM found - using SVGA resolution");
-  } else {
-    cameraConfig.frame_size = FRAMESIZE_VGA;   // 640x480
+    cameraConfig.frame_size = FRAMESIZE_VGA;   // Reduced from SVGA for stability
     cameraConfig.jpeg_quality = 12;
+    cameraConfig.fb_count = 1;                 // Reduced frame buffer count
+    Serial.println("PSRAM found - using VGA resolution");
+  } else {
+    cameraConfig.frame_size = FRAMESIZE_QVGA;  // Smaller resolution
+    cameraConfig.jpeg_quality = 15;
     cameraConfig.fb_count = 1;
-    Serial.println("PSRAM not found - using VGA resolution");
+    Serial.println("PSRAM not found - using QVGA resolution");
   }
 
   // Initialize the camera
@@ -283,10 +296,20 @@ bool connectToWiFi() {
 }
 
 /**
- * Discover Pi Camera Server using mDNS
+ * Discover Pi Camera Server using mDNS or manual configuration
  * Searches for the service and retrieves IP address and port
  */
 bool discoverServer() {
+  // Try manual configuration first if enabled
+  if (MANUAL_SERVER_CONFIG) {
+    Serial.println("Using manual server configuration...");
+    strcpy(serverIP, MANUAL_SERVER_IP);
+    serverPort = MANUAL_SERVER_PORT;
+    Serial.printf("Manual server set to: %s:%d\n", serverIP, serverPort);
+    return true;
+  }
+  
+  // Fallback to mDNS discovery
   Serial.println("Starting mDNS discovery...");
   
   if (!MDNS.begin("esp32cam")) {
@@ -303,8 +326,8 @@ bool discoverServer() {
     if (n > 0) {
       Serial.printf("Found %d service(s)\n", n);
       
-      // Use the first service found
-      IPAddress serverIPAddr = MDNS.IP(0);
+      // Use the first service found - updated API methods
+      IPAddress serverIPAddr = MDNS.address(0);
       int port = MDNS.port(0);
       
       // Store in RTC memory
@@ -335,21 +358,41 @@ bool registerWithServer() {
   secureClient.setCACert(SERVER_CERTIFICATE);
   secureClient.setTimeout(10000); // 10 second timeout
   
+  // Add debug output
+  Serial.printf("Connecting to: %s:%d\n", serverIP, serverPort);
+  Serial.printf("Free heap before connection: %d bytes\n", ESP.getFreeHeap());
+  
   // Connect to server
   String url = "https://" + String(serverIP) + ":" + String(serverPort);
   
   if (!secureClient.connect(serverIP, serverPort)) {
     Serial.println("Failed to connect to server for registration");
-    return false;
+    
+    // Get SSL error details
+    char errorBuf[256];
+    int errorCode = secureClient.lastError(errorBuf, sizeof(errorBuf));
+    Serial.printf("SSL error code: %d, details: %s\n", errorCode, errorBuf);
+    
+    // Try without certificate validation as fallback
+    Serial.println("Retrying without certificate validation...");
+    secureClient.setInsecure(); // Skip certificate validation
+    
+    if (!secureClient.connect(serverIP, serverPort)) {
+      Serial.println("Connection failed even without SSL validation");
+      return false;
+    } else {
+      Serial.println("Connected without SSL validation - certificate issue detected");
+    }
+  } else {
+    Serial.println("SSL connection successful");
   }
   
-  // Create registration JSON
-  StaticJsonDocument<300> registrationDoc;
+  // Create registration JSON - reduced size
+  StaticJsonDocument<200> registrationDoc;
   registrationDoc["deviceId"] = WiFi.macAddress();
   registrationDoc["operationMode"] = operationMode;
   registrationDoc["motionSensorDetected"] = motionSensorDetected;
   registrationDoc["firmwareVersion"] = "1.1.0";
-  registrationDoc["capabilities"] = "camera,motion,sleep";
   
   String jsonString;
   serializeJson(registrationDoc, jsonString);
@@ -393,7 +436,7 @@ bool registerWithServer() {
   String jsonResponse = response.substring(jsonStart + 4);
   Serial.println("Server response: " + jsonResponse);
   
-  StaticJsonDocument<500> responseDoc;
+  StaticJsonDocument<300> responseDoc;
   DeserializationError error = deserializeJson(responseDoc, jsonResponse);
   
   if (error) {
@@ -419,39 +462,25 @@ bool registerWithServer() {
 }
 
 /**
- * WebSocket event handler for messages from server
- * Processes configuration updates and control commands
+ * Original WebSocket message handler for ArduinoWebsockets library
  */
 void onWebSocketMessage(WebsocketsMessage message) {
-  if (message.isText()) {
-    Serial.println("Received message: " + message.data());
-    
-    StaticJsonDocument<300> doc;
-    DeserializationError error = deserializeJson(doc, message.data());
-    
-    if (error) {
-      Serial.println("Failed to parse WebSocket message");
-      return;
+    Serial.printf("[WSc] Message received: %s\n", message.data().c_str());
+    // We can add JSON parsing logic back in here later.
+}
+
+/**
+ * Original WebSocket event handler for ArduinoWebsockets library
+ */
+void onWebSocketEvent(WebsocketsEvent event, String data) {
+    if (event == WebsocketsEvent::ConnectionOpened) {
+        Serial.println("[WSc] Connection Opened");
+        isStreaming = true;
+        streamingStartTime = millis();
+    } else if (event == WebsocketsEvent::ConnectionClosed) {
+        Serial.println("[WSc] Connection Closed");
+        isStreaming = false;
     }
-    
-    const char* messageType = doc["type"];
-    
-    if (strcmp(messageType, "welcome") == 0) {
-      Serial.println("Received welcome message from server");
-    }
-    else if (strcmp(messageType, "recording_started") == 0) {
-      Serial.println("Server confirmed recording started");
-    }
-    else if (strcmp(messageType, "config_update") == 0) {
-      handleConfigurationUpdate(doc["config"]);
-    }
-    else if (strcmp(messageType, "command") == 0) {
-      handleServerCommand(doc);
-    }
-    else if (strcmp(messageType, "error") == 0) {
-      Serial.println("Server error: " + String(doc["message"].as<const char*>()));
-    }
-  }
 }
 
 /**
@@ -522,6 +551,12 @@ void handleConfigurationUpdate(JsonObject config) {
  */
 void handleServerCommand(JsonObject command) {
   const char* action = command["action"];
+  Serial.println("Handling server command: " + String(action ? action : "null"));
+  
+  if (!action) {
+    Serial.println("No action field in command");
+    return;
+  }
   
   if (strcmp(action, "start_streaming") == 0) {
     Serial.println("Server requested streaming start");
@@ -532,11 +567,22 @@ void handleServerCommand(JsonObject command) {
     isStreaming = false;
   }
   else if (strcmp(action, "update_operation_mode") == 0) {
+    Serial.println("Processing operation mode update...");
     const char* newMode = command["operationMode"];
     if (newMode) {
       strcpy(operationMode, newMode);
       Serial.printf("Operation mode updated to: %s\n", operationMode);
+      
+      // Parse config if present
+      if (command["config"]) {
+        Serial.println("Processing config update as well...");
+        handleConfigurationUpdate(command["config"]);
+      }
+      
       configureOperationMode();
+      Serial.println("Operation mode configuration complete");
+    } else {
+      Serial.println("No operationMode field in update_operation_mode command");
     }
   }
   else if (strcmp(action, "reboot") == 0) {
@@ -553,68 +599,100 @@ void handleServerCommand(JsonObject command) {
 }
 
 /**
- * WebSocket event handler for connection events
+ * Test basic connectivity to server before WebSocket
  */
-void onWebSocketEvent(WebsocketsEvent event, String data) {
-  switch (event) {
-    case WebsocketsEvent::ConnectionOpened:
-      Serial.println("WebSocket connection opened");
-      isStreaming = true;
-      streamingStartTime = millis();
-      break;
+bool testServerConnectivity() {
+  Serial.println("Testing server connectivity...");
+  
+  WiFiClientSecure testClient;
+  testClient.setInsecure(); // For simple connectivity test
+  
+  Serial.printf("Connecting to %s:%d...\n", serverIP, serverPort);
+  
+  if (testClient.connect(serverIP, serverPort)) {
+    Serial.println("TCP connection to server successful");
+    
+    // Test HTTPS endpoint
+    Serial.println("Testing HTTPS endpoint...");
+    testClient.print("GET /device/status HTTP/1.1\r\n");
+    testClient.printf("Host: %s:%d\r\n", serverIP, serverPort);
+    testClient.printf("x-api-key: %s\r\n", apiKey);
+    testClient.print("Connection: close\r\n\r\n");
+    
+    // Wait for response
+    unsigned long startTime = millis();
+    while (!testClient.available() && millis() - startTime < 5000) {
+      delay(10);
+    }
+    
+    if (testClient.available()) {
+      String response = testClient.readStringUntil('\n');
+      Serial.printf("Server response: %s\n", response.c_str());
+      testClient.stop();
       
-    case WebsocketsEvent::ConnectionClosed:
-      Serial.println("WebSocket connection closed");
-      isStreaming = false;
-      break;
+      // Test WebSocket endpoint with HTTP request
+      Serial.println("Testing WebSocket endpoint...");
+      WiFiClientSecure wsTest;
+      wsTest.setInsecure();
       
-    case WebsocketsEvent::GotPing:
-      Serial.println("WebSocket ping received");
-      break;
+      if (wsTest.connect(serverIP, serverPort)) {
+        wsTest.print("GET /ws HTTP/1.1\r\n");
+        wsTest.printf("Host: %s:%d\r\n", serverIP, serverPort);
+        wsTest.printf("x-api-key: %s\r\n", apiKey);
+        wsTest.print("Upgrade: websocket\r\n");
+        wsTest.print("Connection: Upgrade\r\n");
+        wsTest.print("Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n");
+        wsTest.print("Sec-WebSocket-Version: 13\r\n\r\n");
+        
+        startTime = millis();
+        while (!wsTest.available() && millis() - startTime < 5000) {
+          delay(10);
+        }
+        
+        if (wsTest.available()) {
+          String wsResponse = wsTest.readStringUntil('\n');
+          Serial.printf("WebSocket endpoint response: %s\n", wsResponse.c_str());
+        } else {
+          Serial.println("No response from WebSocket endpoint");
+        }
+        wsTest.stop();
+      }
       
-    case WebsocketsEvent::GotPong:
-      Serial.println("WebSocket pong received");
-      break;
+      return true;
+    } else {
+      Serial.println("No response from server");
+      testClient.stop();
+      return false;
+    }
+  } else {
+    Serial.println("TCP connection to server failed");
+    return false;
   }
 }
 
 /**
- * Connect to server via WebSocket with authentication
- * Establishes secure WebSocket connection for streaming
+ * Connect to the insecure websocket using the original ArduinoWebsockets library.
  */
 bool connectToWebSocket() {
-  Serial.println("Connecting to WebSocket...");
-  
-  // Set up WebSocket client
-  wsClient.setCACert(SERVER_CERTIFICATE);
-  wsClient.onMessage(onWebSocketMessage);
-  wsClient.onEvent(onWebSocketEvent);
-  
-  // Add authentication header
-  wsClient.addHeader("X-API-Key", apiKey);
-  
-  // Connect to WebSocket endpoint
-  String wsUrl = "wss://" + String(serverIP) + ":" + String(serverPort) + "/ws";
-  
-  bool connected = wsClient.connect(wsUrl);
-  
-  if (connected) {
-    Serial.println("WebSocket connected successfully");
+    Serial.println("Connecting to WebSocket (INSECURE TEST on port 3000)...");
     
-    // Send initial status
-    StaticJsonDocument<100> statusDoc;
-    statusDoc["type"] = "status_update";
-    statusDoc["status"] = "online";
+    // Set up the event handlers
+    wsClient.onMessage(onWebSocketMessage);
+    wsClient.onEvent(onWebSocketEvent);
+
+    // Add the header
+    wsClient.addHeader("x-api-key", apiKey);
+
+    // Attempt to connect. This is a blocking call.
+    bool connected = wsClient.connect(serverIP, 3000, "/ws");
     
-    String statusMessage;
-    serializeJson(statusDoc, statusMessage);
-    wsClient.send(statusMessage);
+    if (connected) {
+        Serial.println("WebSocket connection successful!");
+    } else {
+        Serial.println("WebSocket connection failed!");
+    }
     
-    return true;
-  } else {
-    Serial.println("WebSocket connection failed");
-    return false;
-  }
+    return connected;
 }
 
 /**
@@ -622,7 +700,8 @@ bool connectToWebSocket() {
  * Keeps connection alive and updates server status
  */
 void sendHeartbeat() {
-  if (wsClient.available()) {
+  if (isStreaming) {
+    Serial.println("Creating heartbeat message...");
     StaticJsonDocument<150> heartbeatDoc;
     heartbeatDoc["type"] = "heartbeat";
     heartbeatDoc["uptime"] = millis();
@@ -631,7 +710,11 @@ void sendHeartbeat() {
     
     String heartbeatMessage;
     serializeJson(heartbeatDoc, heartbeatMessage);
+    Serial.printf("Sending heartbeat: %s\n", heartbeatMessage.c_str());
     wsClient.send(heartbeatMessage);
+    Serial.println("Heartbeat sent");
+  } else {
+    Serial.println("Not streaming - skipping heartbeat");
   }
 }
 
@@ -640,6 +723,8 @@ void sendHeartbeat() {
  * Captures JPEG frame and sends via WebSocket
  */
 void captureAndSendFrame() {
+  Serial.printf("Free Heap: %d bytes\n", ESP.getFreeHeap());
+  Serial.println("Starting frame capture...");
   camera_fb_t* frameBuffer = esp_camera_fb_get();
   
   if (!frameBuffer) {
@@ -647,15 +732,21 @@ void captureAndSendFrame() {
     return;
   }
   
+  Serial.printf("Frame captured - size: %d bytes, format: %d\n", frameBuffer->len, frameBuffer->format);
+  
   if (frameBuffer->format != PIXFORMAT_JPEG) {
     Serial.println("Frame is not JPEG format");
     esp_camera_fb_return(frameBuffer);
     return;
   }
   
-  // Send frame via WebSocket
-  if (wsClient.available()) {
+  if (isStreaming) {
+    Serial.printf("Sending frame buffer: %d bytes\n", frameBuffer->len);
+    
+    // This is the key change: send the raw binary buffer.
     wsClient.sendBinary((const char*)frameBuffer->buf, frameBuffer->len);
+  } else {
+    Serial.println("Not streaming - skipping frame send");
   }
   
   // Return frame buffer
@@ -670,7 +761,7 @@ void enterDeepSleep() {
   Serial.println("Preparing for deep sleep...");
   
   // Send sleep status to server
-  if (wsClient.available()) {
+  if (isStreaming) {
     StaticJsonDocument<100> sleepDoc;
     sleepDoc["type"] = "status_update";
     sleepDoc["status"] = "entering_sleep";
@@ -738,6 +829,20 @@ void setup() {
   Serial.begin(115200);
   Serial.setDebugOutput(true);
   
+  // Print memory info at startup
+  Serial.printf("Free heap at startup: %d bytes\n", ESP.getFreeHeap());
+  Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
+  
+  // Force re-registration if flag is set
+  #if FORCE_RE_REGISTRATION
+  Serial.println("FORCE_RE_REGISTRATION enabled - clearing stored API key");
+  memset(apiKey, 0, sizeof(apiKey));
+  memset(serverIP, 0, sizeof(serverIP));
+  serverPort = 0;
+  isRegistered = false;
+  Serial.println("Stored registration data cleared - will re-register");
+  #endif
+  
   // Increment boot counter
   bootCount++;
   
@@ -779,7 +884,7 @@ void setup() {
   digitalWrite(LED_PIN, LOW);
   
   // Initialize camera
-  initializeCamera();
+  initializeCamera(); // RE-ENABLED FOR CORE AFFINITY TESTING
   
   // Connect to WiFi
   if (!connectToWiFi()) {
@@ -823,36 +928,46 @@ void setup() {
 
 /**
  * Main loop function
- * Handles video streaming and connection maintenance
  */
 void loop() {
-  // Check if WebSocket is still connected
-  if (!wsClient.available()) {
-    Serial.println("WebSocket disconnected - entering sleep");
-    enterDeepSleep();
-  }
-  
-  // Handle WebSocket events
-  wsClient.poll();
-  
-  // Check if streaming time has expired
-  if (isStreamingTimeExpired()) {
-    Serial.println("Streaming duration expired - entering sleep");
-    enterDeepSleep();
-  }
-  
-  // Send video frames at specified interval
-  if (isStreaming && millis() - lastFrameTime > FRAME_INTERVAL) {
-    captureAndSendFrame();
-    lastFrameTime = millis();
-  }
-  
-  // Send heartbeat at specified interval
-  if (millis() - lastHeartbeatTime > HEARTBEAT_INTERVAL) {
-    sendHeartbeat();
-    lastHeartbeatTime = millis();
-  }
-  
-  // Small delay to prevent watchdog timeout
-  delay(10);
+    // This is the most important call. It keeps the WebSocket client running.
+    wsClient.poll();
+
+    // The rest of your existing logic remains the same. The `isStreaming` flag
+    // is now controlled by our new `webSocketEvent` handler.
+    static unsigned long connectTimeout = 0;
+    if (!isStreaming) {
+        // If disconnected after a failed initial connection, sleep.
+        // We add a small delay to give the event handler time to set the flag on connect.
+        if (connectTimeout == 0) {
+            connectTimeout = millis();
+        }
+
+        if (millis() - connectTimeout > 15000 && !isStreaming) {
+             Serial.println("Streaming stopped or connection failed - entering sleep.");
+             enterDeepSleep();
+        }
+        return;
+    }
+    
+    // Reset timeout check on successful connection
+    connectTimeout = 0;
+
+    if (isStreamingTimeExpired()) {
+        Serial.println("Streaming duration expired - entering sleep");
+        enterDeepSleep();
+    }
+
+    // RE-ENABLED FOR CORE AFFINITY TESTING
+    if (millis() - lastFrameTime > FRAME_INTERVAL) {
+        captureAndSendFrame();
+        lastFrameTime = millis();
+    }
+
+    if (millis() - lastHeartbeatTime > HEARTBEAT_INTERVAL) {
+        sendHeartbeat();
+        lastHeartbeatTime = millis();
+    }
+    
+    delay(10);
 }

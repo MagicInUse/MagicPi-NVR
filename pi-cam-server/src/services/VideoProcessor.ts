@@ -6,7 +6,7 @@
 import ffmpeg from 'fluent-ffmpeg';
 import { promises as fs } from 'fs';
 import path from 'path';
-import { Writable } from 'stream';
+import { Writable, PassThrough } from 'stream';
 import config from '../config.js';
 import { DeviceManager } from './DeviceManager.js';
 
@@ -20,98 +20,75 @@ export class VideoProcessor {
 
   constructor() {
     this.deviceManager = DeviceManager.getInstance();
-    console.log('VideoProcessor initialized');
+    // Set FFmpeg path explicitly
+    ffmpeg.setFfmpegPath('C:\\Users\\Magic\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.0-essentials_build\\bin\\ffmpeg.exe');
+    console.log('VideoProcessor initialized with FFmpeg path configured. To change, modify the path in VideoProcessor.');
   }
 
   /**
    * Start recording for a specific device
    * @param deviceId - Device ID to start recording for
-   * @returns Promise<Writable> - Stream to write video data to
+   * @returns Promise<void>
    */
-  public async startRecording(deviceId: string): Promise<Writable> {
-    try {
-      console.log(`Starting recording for device: ${deviceId}`);
+  public startRecording(deviceId: string): Promise<void> {
+    return new Promise(async (resolve, reject) => {
+      try {
+        console.log(`Starting recording for device: ${deviceId}`);
 
-      // Stop existing recording if any
-      await this.stopRecording(deviceId);
+        // Stop existing recording if any
+        await this.stopRecording(deviceId);
 
-      // Create output directory structure
-      const outputPath = await this.createOutputPath(deviceId);
-      
-      // Get device configuration
-      const device = this.deviceManager.getDeviceById(deviceId);
-      if (!device) {
-        throw new Error(`Device ${deviceId} not found`);
-      }
-
-      // Create FFmpeg command
-      const command = ffmpeg()
-        .inputFormat(config.video.inputFormat)
-        .inputOptions([
-          '-use_wallclock_as_timestamps', '1',
-          '-thread_queue_size', '512'
-        ])
-        .videoCodec(config.video.outputCodec)
-        .outputOptions([
-          '-preset', 'ultrafast',
-          '-tune', 'zerolatency',
-          '-crf', '23',
-          '-maxrate', '2M',
-          '-bufsize', '4M',
-          '-g', '30',
-          '-keyint_min', '30',
-          '-sc_threshold', '0',
-          '-f', 'mp4',
-          '-movflags', '+faststart'
-        ])
-        .output(outputPath)
-        .on('start', (commandLine) => {
-          console.log(`FFmpeg recording started for ${deviceId}: ${commandLine}`);
-          this.deviceManager.setRecordingStatus(deviceId, true);
-        })
-        .on('progress', (progress) => {
-          // Log progress every minute to avoid spam
-          if (progress.timemark && progress.timemark.includes(':00.')) {
-            console.log(`Recording progress for ${deviceId}: ${progress.timemark}`);
-          }
-        })
-        .on('error', (err, stdout, stderr) => {
-          console.error(`FFmpeg error for device ${deviceId}:`, err.message);
-          console.error('FFmpeg stderr:', stderr);
-          this.handleRecordingError(deviceId, err);
-        })
-        .on('end', () => {
-          console.log(`Recording ended for device: ${deviceId}`);
-          this.deviceManager.setRecordingStatus(deviceId, false);
-          this.activeRecordings.delete(deviceId);
-          this.recordingStreams.delete(deviceId);
-        });
-
-      // Store the command for later reference
-      this.activeRecordings.set(deviceId, command);
-
-      // Create input stream for FFmpeg
-      const inputStream = new Writable({
-        write(chunk, encoding, callback) {
-          // FFmpeg will read from this stream
-          callback();
+        // Create output directory structure
+        const outputPath = await this.createOutputPath(deviceId);
+        
+        // Get device configuration
+        const device = this.deviceManager.getDeviceById(deviceId);
+        if (!device) {
+          throw new Error(`Device ${deviceId} not found`);
         }
-      });
 
-      // Connect input stream to FFmpeg
-      command.input(inputStream);
-      
-      // Start the FFmpeg process
-      command.run();
+        // Create input stream for piping JPEG frames
+        const inputStream = new PassThrough();
+        this.recordingStreams.set(deviceId, inputStream);
 
-      // Store the stream reference
-      this.recordingStreams.set(deviceId, inputStream);
+        // Create FFmpeg command
+        const command = ffmpeg(inputStream)
+          .inputFormat('mjpeg')
+          .inputOptions([
+            '-use_wallclock_as_timestamps', '1',
+            '-thread_queue_size', '512'
+          ])
+          .videoCodec(config.video.outputCodec)
+          .outputOptions([
+            '-c:v libx264',
+            '-pix_fmt yuv420p',
+            '-preset ultrafast',
+            '-tune zerolatency',
+            '-r 10' // Set output frame rate
+          ])
+          .toFormat('mp4')
+          .on('start', (commandLine: string) => {
+            console.log(`FFmpeg started for ${deviceId} with command: ${commandLine}`);
+            this.activeRecordings.set(deviceId, command);
+            resolve();
+          })
+          .on('error', (err: Error) => {
+            console.error(`FFmpeg error for ${deviceId}:`, err.message);
+            this.activeRecordings.delete(deviceId);
+            this.recordingStreams.delete(deviceId);
+            reject(err);
+          })
+          .on('end', () => {
+            console.log(`Recording finished for ${deviceId}`);
+            this.activeRecordings.delete(deviceId);
+            this.recordingStreams.delete(deviceId);
+          });
 
-      return inputStream;
-    } catch (error) {
-      console.error(`Error starting recording for device ${deviceId}:`, error);
-      throw error;
-    }
+        command.save(outputPath);
+      } catch (error) {
+        reject(error);
+      }
+    });
   }
 
   /**
@@ -193,11 +170,23 @@ export class VideoProcessor {
     const hour = String(now.getHours()).padStart(2, '0');
 
     const dateString = `${year}-${month}-${day}`;
-    const deviceDir = path.join(config.video.recordingsPath, deviceId);
+    
+    // Sanitize device ID for filesystem (replace colons with hyphens)
+    const sanitizedDeviceId = deviceId.replace(/:/g, '-');
+    
+    const deviceDir = path.join(config.video.recordingsPath, sanitizedDeviceId);
     const dateDir = path.join(deviceDir, dateString);
 
+    console.log(`Creating directory: ${dateDir}`);
+    
     // Create directories if they don't exist
-    await fs.mkdir(dateDir, { recursive: true });
+    try {
+      await fs.mkdir(dateDir, { recursive: true });
+      console.log(`Successfully created directory: ${dateDir}`);
+    } catch (error) {
+      console.error(`Failed to create directory ${dateDir}:`, error);
+      throw error;
+    }
 
     // Generate filename with timestamp
     const filename = `${hour}.mp4`;
@@ -266,7 +255,7 @@ export class VideoProcessor {
         const dateDir = path.join(deviceDir, dateFilter);
         try {
           const files = await fs.readdir(dateDir);
-          files.forEach(file => {
+          files.forEach((file: string) => {
             if (file.endsWith('.mp4')) {
               recordings.push(path.join(dateDir, file));
             }
@@ -282,7 +271,7 @@ export class VideoProcessor {
           const stat = await fs.stat(fullDatePath);
           if (stat.isDirectory()) {
             const files = await fs.readdir(fullDatePath);
-            files.forEach(file => {
+            files.forEach((file: string) => {
               if (file.endsWith('.mp4')) {
                 recordings.push(path.join(fullDatePath, file));
               }

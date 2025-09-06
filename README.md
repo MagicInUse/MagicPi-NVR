@@ -1,4 +1,328 @@
-# MagicPi-NVR - Wireless Camera Security System
+# 🎥 MagicPi NVR - Network Video Recorder
+
+A high-performance surveillance system featuring **binary JPEG streaming** from ESP32-CAM devices to a centralized Node.js server with real-time video recording and React frontend dashboard.
+
+## 🚀 Quick Start
+
+### Prerequisites
+- Node.js 18+ 
+- npm
+- OpenSSL (for SSL certificates)
+
+### Installation & Deployment
+
+```bash
+# 1. Install all dependencies
+npm run install:all
+
+# 2. Generate SSL certificates (development)
+npm run setup:certs
+
+# 3. Build the complete application
+npm run build
+
+# 4. Start the server
+npm start
+```
+
+The application will be available at: `https://localhost:3443`
+
+## 📁 Project Structure
+
+```
+MagicPi-NVR/
+├── client/                 # React TypeScript frontend
+│   ├── src/
+│   │   ├── components/     # React components
+│   │   ├── services/       # API services
+│   │   └── types/          # TypeScript interfaces
+│   └── dist/              # Built frontend (after npm run build)
+├── pi-cam-server/         # Node.js TypeScript backend
+│   ├── src/
+│   │   ├── api/           # REST API controllers
+│   │   ├── services/      # Business logic services  
+│   │   ├── middleware/    # Express middleware
+│   │   └── types/         # TypeScript interfaces
+│   ├── dist/              # Built backend + deployed frontend
+│   │   ├── client/        # Frontend files (copied during build)
+│   │   └── *.js           # Compiled backend files
+│   └── security/          # SSL certificates
+└── package.json           # Root workspace configuration
+```
+
+## 🛠️ Development
+
+### Frontend Development
+```bash
+npm run dev:frontend      # Start Vite dev server (http://localhost:5173)
+```
+
+### Backend Development  
+```bash
+npm run dev:backend       # Start nodemon with auto-reload
+```
+
+### Full Development Setup
+```bash
+# Terminal 1: Frontend dev server
+npm run dev:frontend
+
+# Terminal 2: Backend dev server  
+npm run dev:backend
+```
+
+## 🏗️ Build Process
+
+The build process creates a single deployable package:
+
+1. **Frontend Build**: React app compiled to static files
+2. **Backend Build**: TypeScript compiled to JavaScript
+3. **Integration**: Frontend copied to backend's `dist/client/` 
+4. **Result**: Single `pi-cam-server/dist/` folder ready for deployment
+
+### Build Commands
+
+```bash
+# Build everything for production
+npm run build
+
+# Or step by step:
+cd client && npm run build              # Build frontend
+cd pi-cam-server && npm run build      # Build backend  
+cd pi-cam-server && npm run copy:frontend  # Copy frontend to backend
+```
+
+## 🔧 Configuration
+
+### SSL Certificates
+
+For **development**:
+```bash
+npm run setup:certs  # Generates self-signed certificates
+```
+
+For **production**: Replace files in `pi-cam-server/security/`:
+- `key.pem` - Private key
+- `cert.pem` - Certificate
+
+### Server Configuration
+
+Edit `pi-cam-server/src/config.ts`:
+- Server ports and host
+- Recording settings  
+- Video processing options
+- Security settings
+
+## 📦 Deployment
+
+### Single Server Deployment
+
+1. Build the application:
+   ```bash
+   npm run build
+   ```
+
+2. Copy the `pi-cam-server/dist/` folder to your server
+
+3. Install production dependencies:
+   ```bash
+   cd pi-cam-server
+   npm install --production
+   ```
+
+4. Add proper SSL certificates to `security/`
+
+5. Start the server:
+   ```bash
+   npm start
+   ```
+
+### Docker Deployment (Future)
+
+Docker support will be added in future versions for easier deployment.
+
+## 🎯 Features
+
+### 🚀 **Binary Video Streaming Architecture** (Latest Implementation)
+
+- **Real-time JPEG Streaming**: ESP32-CAM devices send raw binary JPEG frames via WebSocket
+- **Automatic Format Detection**: Server detects JPEG magic numbers (0xFF, 0xD8) vs JSON commands
+- **Live Video Recording**: Binary frames processed through FFmpeg pipeline to MP4 files
+- **High Performance**: Eliminates JSON parsing overhead for video data transmission
+- **Stream Processing**: PassThrough streams with MJPEG input format for efficient processing
+
+### Frontend (React + TypeScript)
+
+- 📱 Responsive surveillance dashboard
+- 🎥 Real-time video streaming interface
+- 📁 Recording browser with hierarchical navigation
+- ⚙️ Device configuration interface
+- 🔄 WebSocket real-time updates
+- 📊 Device status monitoring
+
+### Backend (Node.js + TypeScript)
+
+- 🛡️ Device registration and authentication
+- 🎬 **FFmpeg Binary Stream Processing**: Direct MJPEG input from binary WebSocket data
+- 🔐 HTTPS and WebSocket secure connections
+- 📡 mDNS service discovery
+- 🧹 Automatic cleanup services
+- 🔄 Dual WebSocket support (frontend + devices)
+- 📦 **Binary Data Handling**: Efficient processing of raw JPEG frames
+- 🎥 **H.264 MP4 Recording**: Real-time encoding with configurable quality settings
+
+### ESP32-CAM Client Features
+
+- 📹 **Binary JPEG Transmission**: Sends raw camera frames via `wsClient.sendBinary()`
+- 🔄 Automatic server discovery and registration
+- 💤 Power-efficient operation modes
+- 🔧 Remote configuration capabilities
+- 📱 Hardware motion sensor support
+
+## � Technical Implementation
+
+### Binary Streaming Architecture
+
+The system implements a high-performance binary streaming architecture for real-time video transmission:
+
+```mermaid
+graph LR
+    A[ESP32-CAM] -->|Binary JPEG| B[WebSocket]
+    B -->|Magic Number Detection| C[Server Handler]
+    C -->|JPEG Data| D[PassThrough Stream]
+    D -->|MJPEG Input| E[FFmpeg Process]
+    E -->|H.264 Encode| F[MP4 File]
+```
+
+### Key Components
+
+#### 1. ESP32-CAM Binary Transmission
+```cpp
+// Sends raw JPEG buffer data
+wsClient.sendBinary((const char*)frameBuffer->buf, frameBuffer->len);
+```
+
+#### 2. Server-side JPEG Detection
+```typescript
+// Detect JPEG magic numbers (0xFF, 0xD8)
+if (data[0] === 0xFF && data[1] === 0xD8) {
+    // Process as binary JPEG frame
+    await this.videoProcessor.writeFrame(deviceId, data);
+}
+```
+
+#### 3. FFmpeg Stream Processing
+```typescript
+// Direct MJPEG input from WebSocket stream
+ffmpeg()
+    .inputFormat('mjpeg')
+    .input('pipe:0')
+    .videoCodec('libx264')
+    .outputOptions(['-preset ultrafast', '-tune zerolatency'])
+    .fps(10)
+    .save(outputPath)
+```
+
+### Performance Benefits
+
+- **Zero JSON Overhead**: Raw binary transmission eliminates parsing delays
+- **Direct Stream Processing**: JPEG frames pipe directly to FFmpeg without intermediate storage
+- **Real-time Encoding**: H.264 encoding with ultrafast presets for minimal latency
+- **Memory Efficient**: PassThrough streams prevent buffer accumulation
+
+### Recording Pipeline
+
+1. **Frame Capture**: ESP32-CAM captures JPEG at configured quality
+2. **Binary Transmission**: Raw frame data sent via WebSocket
+3. **Magic Number Detection**: Server identifies JPEG vs command data
+4. **Stream Processing**: Data flows through PassThrough stream to FFmpeg
+5. **H.264 Encoding**: Real-time conversion to MP4 with configurable settings
+6. **File Management**: Automatic directory creation and file rotation
+
+## �🚨 Troubleshooting
+
+### Build Errors
+- Ensure all dependencies installed: `npm run install:all`
+- Clear build cache: `npm run clean && npm run build`
+
+### SSL Certificate Issues
+- Regenerate certificates: `npm run setup:certs`
+- Check `pi-cam-server/security/` folder exists
+
+### Frontend Not Loading
+- Verify build completed: Check `pi-cam-server/dist/client/` exists
+- Check server logs for frontend path detection
+
+### Port Conflicts
+- Default HTTPS port: 3443
+- Modify in `pi-cam-server/src/config.ts` if needed
+
+## � Next Steps - Frontend Integration
+
+### Phase 1: Real-time Binary Stream Display (In Progress)
+
+The backend binary streaming architecture is complete and operational. The next development phase focuses on frontend integration:
+
+#### 🎯 Immediate Goals
+
+1. **Live Stream Viewer Component**
+   - Create React component to display real-time JPEG frames
+   - WebSocket connection to receive binary frame data
+   - Canvas-based rendering for smooth playback
+
+2. **Recording Status Integration**
+   - Real-time recording indicators on device dashboard
+   - Live file size and duration tracking
+   - Recording start/stop controls
+
+3. **Binary Stream Monitoring**
+   - Frame rate statistics and quality metrics
+   - Network throughput visualization
+   - Device performance monitoring
+
+#### 🔧 Technical Implementation Plan
+
+```typescript
+// Frontend WebSocket handler for binary frames
+const handleBinaryFrame = (data: ArrayBuffer) => {
+  const blob = new Blob([data], { type: 'image/jpeg' });
+  const imageUrl = URL.createObjectURL(blob);
+  updateCanvasWithFrame(imageUrl);
+};
+```
+
+#### 📊 Development Status
+
+- ✅ **Backend Binary Streaming**: Complete
+- ✅ **ESP32-CAM Binary Transmission**: Complete  
+- ✅ **FFmpeg Pipeline**: Complete
+- ✅ **MP4 Recording**: Complete
+- 🚧 **Frontend Live Display**: Next Phase
+- 🚧 **Stream Controls**: Next Phase
+- 🚧 **Recording Management UI**: Next Phase
+
+### Phase 2: Enhanced UI Features (Planned)
+
+- Advanced video player with scrubbing
+- Multi-camera grid view
+- Motion detection visualization
+- Mobile-responsive controls
+
+## �📄 License
+
+MIT License - see LICENSE file for details.
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Test thoroughly
+5. Submit a pull request
+
+---
+
+**Ready for deployment! 🚀** - Wireless Camera Security System
 
 A complete, secure wireless camera system consisting of a Raspberry Pi 5 host server and multiple ESP32-CAM clients. This system provides automated video recording, motion detection, and secure wireless communication for comprehensive surveillance coverage.
 

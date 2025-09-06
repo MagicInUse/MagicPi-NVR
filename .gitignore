@@ -38,6 +38,9 @@ config.backup.ts
 *.ino.partitions.bin
 *.ino.bootloader.bin
 
+# ESP32 development file
+esp32-cam-client/esp32-cam-client-dev.ino
+
 # Runtime data
 pids
 *.pid

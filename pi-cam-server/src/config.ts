@@ -30,6 +30,12 @@ export interface VideoConfig {
   recordingsPath: string;
 }
 
+export interface RecordingsConfig {
+  directory: string;
+  maxSizeGB: number;
+  retentionDays: number;
+}
+
 /**
  * Main configuration object
  */
@@ -60,6 +66,12 @@ export const config = {
     defaultFramerate: 10,
     recordingsPath: './recordings'
   } as VideoConfig,
+
+  recordings: {
+    directory: './recordings',
+    maxSizeGB: 100,
+    retentionDays: 7
+  } as RecordingsConfig,
 
   // Camera resolution mappings for ESP32-CAM
   cameraResolutions: {

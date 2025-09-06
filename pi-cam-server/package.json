@@ -5,7 +5,12 @@
   "main": "dist/server.js",
   "scripts": {
     "build": "tsc",
+    "build:frontend": "cd ../client && npm run build",
+    "build:deploy": "npm run build:frontend && npm run build && npm run copy:frontend",
+    "copy:frontend": "powershell -Command \"if (Test-Path 'dist/client') { Remove-Item -Recurse -Force 'dist/client' }; Copy-Item -Recurse '../client/dist' 'dist/client'\"",
+    "setup:certs": "powershell -ExecutionPolicy Bypass -File generate-certs.ps1",
     "start": "node dist/server.js",
+    "start:dev": "npm run setup:certs && npm run start",
     "dev": "nodemon src/server.ts",
     "clean": "rm -rf dist",
     "prestart": "npm run build"

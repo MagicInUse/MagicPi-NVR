@@ -39,6 +39,7 @@ export interface DeviceConfig {
 export interface DeviceInfo {
   deviceId: string;
   apiKey: string;
+  name?: string;
   status: DeviceStatus;
   config: DeviceConfig;
   socket?: WebSocket;
@@ -48,6 +49,7 @@ export interface DeviceInfo {
   isRecording: boolean;
   operationMode: 'motion-triggered' | 'always-on' | 'continuous';
   motionSensorDetected: boolean;
+  batteryLevel?: number;
 }
 
 /**
@@ -235,7 +237,7 @@ export class DeviceManager {
     try {
       const device = this.devices.get(deviceId);
       if (device) {
-        device.socket = undefined;
+        delete device.socket;
         this.updateDeviceStatus(deviceId, DeviceStatus.OFFLINE);
         console.log(`WebSocket removed from device: ${deviceId}`);
       }
@@ -273,13 +275,13 @@ export class DeviceManager {
         device.config = { ...device.config, ...config };
         console.log(`Device ${deviceId} configuration updated:`, config);
         
-        // Send configuration update to device if connected
-        if (device.socket && device.socket.readyState === WebSocket.OPEN) {
-          this.sendCommand(deviceId, {
-            action: 'update_config',
-            config: device.config
-          });
-        }
+        // Temporarily disable sending config updates to ESP32 until we fix the receive issue
+        // if (device.socket && device.socket.readyState === WebSocket.OPEN) {
+        //   this.sendCommand(deviceId, {
+        //     action: 'update_config',
+        //     config: device.config
+        //   });
+        // }
       } else {
         console.warn(`Attempted to update config for unknown device: ${deviceId}`);
       }
@@ -308,14 +310,14 @@ export class DeviceManager {
         
         console.log(`Device ${deviceId} operation mode updated to: ${operationMode} (motion sensor: ${motionSensorDetected})`);
         
-        // Send operation mode update to device if connected
-        if (device.socket && device.socket.readyState === WebSocket.OPEN) {
-          this.sendCommand(deviceId, {
-            action: 'update_operation_mode',
-            operationMode: operationMode,
-            config: device.config
-          });
-        }
+        // Temporarily disable sending commands to ESP32 until we fix the receive issue
+        // if (device.socket && device.socket.readyState === WebSocket.OPEN) {
+        //   this.sendCommand(deviceId, {
+        //     action: 'update_operation_mode',
+        //     operationMode: operationMode,
+        //     config: device.config
+        //   });
+        // }
       } else {
         console.warn(`Attempted to update operation mode for unknown device: ${deviceId}`);
       }
