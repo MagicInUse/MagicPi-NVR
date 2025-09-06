@@ -53,6 +53,7 @@ export class ApiController {
   public startDeviceStream = async (req: Request, res: Response): Promise<void> => {
     try {
       const { deviceId: rawDeviceId } = req.params;
+      console.log(rawDeviceId);
       
       if (!rawDeviceId) {
         console.log('No device ID provided');
