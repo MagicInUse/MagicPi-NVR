@@ -11,6 +11,8 @@ import { Responder } from '@homebridge/ciao';
 import { promises as fs } from 'fs';
 import { IncomingMessage } from 'http';
 import url from 'url';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 
 // Import services and middleware
 import config from './config.js';
@@ -988,7 +990,12 @@ async function main(): Promise<void> {
 }
 
 // Start the application
-if (require.main === module) {
+// In ES modules, we check if this file is being run directly
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Check if this module is being run directly
+if (import.meta.url === `file://${process.argv[1]}` || (process.argv[1] && process.argv[1].endsWith('server.js'))) {
   main().catch((error) => {
     console.error('Failed to start server:', error);
     process.exit(1);

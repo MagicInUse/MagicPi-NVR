@@ -70,8 +70,9 @@ const Dashboard: React.FC = () => {
 
   const connectWebSocket = () => {
     try {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws`;
+      // Use HTTP WebSocket server on port 3000 for all WebSocket connections
+      // This avoids SSL certificate issues and uses the dedicated WebSocket port
+      const wsUrl = `ws://${window.location.hostname}:3000/ws`;
       
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;

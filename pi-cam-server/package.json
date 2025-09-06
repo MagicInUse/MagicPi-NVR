@@ -1,6 +1,7 @@
 {
   "name": "pi-cam-server",
   "version": "1.0.0",
+  "type": "module",
   "description": "Secure wireless camera system host server for Raspberry Pi 5",
   "main": "dist/server.js",
   "scripts": {

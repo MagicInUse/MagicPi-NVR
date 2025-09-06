@@ -308,7 +308,7 @@ const handleBinaryFrame = (data: ArrayBuffer) => {
 - Motion detection visualization
 - Mobile-responsive controls
 
-## �📄 License
+## License
 
 MIT License - see LICENSE file for details.
 
